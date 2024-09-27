@@ -34,6 +34,7 @@
   Dependencies:
     Adler32       - github.com/TheLazyTomcat/Lib.Adler32
   * AuxExceptions - github.com/TheLazyTomcat/Lib.AuxExceptions
+    AuxMath       - github.com/TheLazyTomcat/Lib.AuxMath
     AuxTypes      - github.com/TheLazyTomcat/Lib.AuxTypes
     StrRect       - github.com/TheLazyTomcat/Lib.StrRect
 
@@ -86,6 +87,14 @@ unit ProcessGlobalVars;
   {$MODE ObjFPC}
   {$DEFINE FPC_DisableWarns}
   {$MACRO ON}
+  {$INLINE ON}
+  {$DEFINE CanInline}
+{$ELSE}
+  {$IF CompilerVersion >= 17} // Delphi 2005+
+    {$DEFINE CanInline}
+  {$ELSE}
+    {$UNDEF CanInline}
+  {$IFEND}
 {$ENDIF}
 {$H+}
 
@@ -124,12 +133,12 @@ type
 
 //------------------------------------------------------------------------------
 
-Function GlobVarTranslateIdentifier(const Identifier: String): TPGVIdentifier;
+Function GlobVarTranslateIdentifier(const Identifier: String): TPGVIdentifier;{$IFDEF CanInline} inline;{$ENDIF}
 
 //------------------------------------------------------------------------------
 
-procedure GlobVarLock;
-procedure GlobVarUnlock;
+procedure GlobVarLock;{$IFDEF CanInline} inline;{$ENDIF}
+procedure GlobVarUnlock;{$IFDEF CanInline} inline;{$ENDIF}
 
 Function GlobVarCount: Integer;
 
@@ -140,10 +149,10 @@ Function GlobVarEnumerate: TPGVIdentifierArray;
 //------------------------------------------------------------------------------
 
 Function GlobVarExists(Identifier: TPGVIdentifier): Boolean; overload;
-Function GlobVarExists(const Identifier: String): Boolean; overload;
+Function GlobVarExists(const Identifier: String): Boolean; overload;{$IFDEF CanInline} inline;{$ENDIF}
 
 Function GlobVarFind(Identifier: TPGVIdentifier; out Variable: TPGVVariable): Boolean; overload;
-Function GlobVarFind(const Identifier: String; out Variable: TPGVVariable): Boolean; overload;
+Function GlobVarFind(const Identifier: String; out Variable: TPGVVariable): Boolean; overload;{$IFDEF CanInline} inline;{$ENDIF}
 
 Function GlobVarGet(Identifier: TPGVIdentifier): TPGVVariable; overload;
 Function GlobVarGet(const Identifier: String): TPGVVariable; overload;
@@ -161,8 +170,14 @@ Function GlobVarHeapStored(const Identifier: String): Boolean; overload;
 Function GlobVarAllocate(Identifier: TPGVIdentifier; Size: TMemSize): TPGVVariable; overload;
 Function GlobVarAllocate(const Identifier: String; Size: TMemSize): TPGVVariable; overload;
 
+Function GlobVarAlloc(Identifier: TPGVIdentifier; Size: TMemSize): TPGVVariable; overload;{$IFDEF CanInline} inline;{$ENDIF}
+Function GlobVarAlloc(const Identifier: String; Size: TMemSize): TPGVVariable; overload;{$IFDEF CanInline} inline;{$ENDIF}
+
 Function GlobVarReallocate(Identifier: TPGVIdentifier; NewSize: TMemSize): TPGVVariable; overload;
-Function GlobVarReallocate(const Identifier: String; NewSize: TMemSize): TPGVVariable; overload;
+Function GlobVarReallocate(const Identifier: String; NewSize: TMemSize): TPGVVariable; overload;{$IFDEF CanInline} inline;{$ENDIF}
+
+Function GlobVarRealloc(Identifier: TPGVIdentifier; NewSize: TMemSize): TPGVVariable; overload;{$IFDEF CanInline} inline;{$ENDIF}
+Function GlobVarRealloc(const Identifier: String; NewSize: TMemSize): TPGVVariable; overload;{$IFDEF CanInline} inline;{$ENDIF}
 
 procedure GlobVarFree(Identifier: TPGVIdentifier); overload;
 procedure GlobVarFree(const Identifier: String); overload;
@@ -174,6 +189,11 @@ Function GlobVarStore(const Identifier: String; const Buffer; Count: TMemSize): 
 
 Function GlobVarLoad(Identifier: TPGVIdentifier; out Buffer; Count: TMemSize): TMemSize; overload;
 Function GlobVarLoad(const Identifier: String; out Buffer; Count: TMemSize): TMemSize; overload;
+
+//------------------------------------------------------------------------------
+
+Function GlobVarTryGet(Identifier: TPGVIdentifier; out Variable: TPGVVariable; out Size: TMemSize): Boolean; overload;
+Function GlobVarTryGet(const Identifier: String; out Variable: TPGVVariable; out Size: TMemSize): Boolean; overload;{$IFDEF CanInline} inline;{$ENDIF}
 
 implementation
 
@@ -1063,6 +1083,20 @@ end;
 
 //------------------------------------------------------------------------------
 
+Function GlobVarAlloc(Identifier: TPGVIdentifier; Size: TMemSize): TPGVVariable;
+begin
+Result := GlobVarAllocate(Identifier,Size);
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarAlloc(const Identifier: String; Size: TMemSize): TPGVVariable;
+begin
+Result := GlobVarAllocate(Identifier,Size);
+end;
+
+//------------------------------------------------------------------------------
+
 Function GlobVarReallocate(Identifier: TPGVIdentifier; NewSize: TMemSize): TPGVVariable;
 var
   Segment:  PPGVSegment;
@@ -1097,6 +1131,20 @@ end;
 Function GlobVarReallocate(const Identifier: String; NewSize: TMemSize): TPGVVariable;
 begin
 Result := GlobVarReallocate(GlobVarTranslateIdentifier(Identifier),NewSize);
+end;
+
+//------------------------------------------------------------------------------
+
+Function GlobVarRealloc(Identifier: TPGVIdentifier; NewSize: TMemSize): TPGVVariable;
+begin
+Result := GlobVarReallocate(Identifier,NewSize);
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarRealloc(const Identifier: String; NewSize: TMemSize): TPGVVariable;
+begin
+Result := GlobVarReallocate(Identifier,NewSize);
 end;
 
 //------------------------------------------------------------------------------
@@ -1217,6 +1265,36 @@ try
 finally
   LeaveCriticalSection(VAR_HeadPtr^.Lock);
 end;
+end;
+
+//------------------------------------------------------------------------------
+
+Function GlobVarTryGet(Identifier: TPGVIdentifier; out Variable: TPGVVariable; out Size: TMemSize): Boolean;
+var
+  Segment:  PPGVSegment;
+  Entry:    PPGVSegmentEntry;
+begin
+Result := False;
+Variable := nil;
+Size := 0;
+EnterCriticalSection(VAR_HeadPtr^.Lock);
+try
+  If EntryFind(Identifier,Segment,Entry) then
+    begin
+      Variable := Addr(Entry^.Address);
+      Size := EntrySize(Entry);
+      Result := True;
+    end;
+finally
+  LeaveCriticalSection(VAR_HeadPtr^.Lock);
+end;
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarTryGet(const Identifier: String; out Variable: TPGVVariable; out Size: TMemSize): Boolean;
+begin
+Result := GlobVarTryGet(GlobVarTranslateIdentifier(Identifier),Variable,Size);
 end;
 
 
