@@ -136,12 +136,12 @@ type
 
 //------------------------------------------------------------------------------
 
-Function GlobVarTranslateIdentifier(const Identifier: String): TPGVIdentifier;{$IFDEF CanInline} inline;{$ENDIF}
+Function GlobVarTranslateIdentifier(const Identifier: String): TPGVIdentifier;{$IF Defined(FPC) and Defined(CanInline)} inline;{$IFEND}
 
 //------------------------------------------------------------------------------
 
-procedure GlobVarLock;{$IFDEF CanInline} inline;{$ENDIF}
-procedure GlobVarUnlock;{$IFDEF CanInline} inline;{$ENDIF}
+procedure GlobVarLock;
+procedure GlobVarUnlock;
 
 Function GlobVarCount: Integer;
 
@@ -159,6 +159,9 @@ Function GlobVarFind(const Identifier: String; out Variable: TPGVVariable): Bool
 
 Function GlobVarGet(Identifier: TPGVIdentifier): TPGVVariable; overload;
 Function GlobVarGet(const Identifier: String): TPGVVariable; overload;
+
+Function GlobVarTryGet(Identifier: TPGVIdentifier; out Variable: TPGVVariable; out Size: TMemSize): Boolean; overload;
+Function GlobVarTryGet(const Identifier: String; out Variable: TPGVVariable; out Size: TMemSize): Boolean; overload;{$IFDEF CanInline} inline;{$ENDIF}
 
 //------------------------------------------------------------------------------
 
@@ -192,11 +195,6 @@ Function GlobVarStore(const Identifier: String; const Buffer; Count: TMemSize): 
 
 Function GlobVarLoad(Identifier: TPGVIdentifier; out Buffer; Count: TMemSize): TMemSize; overload;
 Function GlobVarLoad(const Identifier: String; out Buffer; Count: TMemSize): TMemSize; overload;
-
-//------------------------------------------------------------------------------
-
-Function GlobVarTryGet(Identifier: TPGVIdentifier; out Variable: TPGVVariable; out Size: TMemSize): Boolean; overload;
-Function GlobVarTryGet(const Identifier: String; out Variable: TPGVVariable; out Size: TMemSize): Boolean; overload;{$IFDEF CanInline} inline;{$ENDIF}
 
 implementation
 
@@ -256,12 +254,14 @@ type
 
 const
   // SEFLAG = segment entry flag
-  PGV_SEFLAG_USED        = $00000001;
-  PGV_SEFLAG_REALLOCATED = $00000002;
+  PGV_SEFLAG_USED        = UInt32($00000001);
+  PGV_SEFLAG_REALLOCATED = UInt32($00000002);
 
-  PGV_SEFLAG_SMLSIZE_MASK  = $F0000000;
-  PGV_SEFLAG_SMLSIZE_SMASK = $0000000F;
-  PGV_SEFLAG_SMLSIZE_SHIFT = 28;
+  PGV_SEFLAG_SMLSIZE_MASK   = UInt32($F0000000);
+  // dunno, but FPC 3.2.2 cannot seem to grasp (X and not PGV_SEFLAG_SMLSIZE_MASK) :/
+  PGV_SEFLAG_SMLSIZE_MASK_N = UInt32($0FFFFFFF);
+  PGV_SEFLAG_SMLSIZE_SMASK  = UInt32($0000000F);
+  PGV_SEFLAG_SMLSIZE_SHIFT  = 28;
 
 //------------------------------------------------------------------------------
 const  
@@ -548,7 +548,11 @@ end;
 
 Function SegmentAdd: PPGVSegment;
 begin
-Result := GlobalMemoryAllocate(SizeOf(TPGVSegment));
+{
+  Why adding PGV_SEGMENT_PADDINGSIZE when it is zero? To stop FPC bitching
+  about constant not being used... uuaaa!
+}
+Result := GlobalMemoryAllocate(SizeOf(TPGVSegment){$IF PGV_SEGMENT_PADDINGSIZE = 0} + PGV_SEGMENT_PADDINGSIZE{$IFEND});
 If Assigned(VAR_HeadPtr^.FirstSegment) then
   begin
     // there are some segments already allocated
@@ -563,6 +567,8 @@ end;
 //------------------------------------------------------------------------------
 
 procedure SegmentRemove(Segment: PPGVSegment);
+var
+  Temp: Pointer;
 begin
 If Assigned(Segment^.Head.PrevSegment) then
   PPGVSegment(Segment^.Head.PrevSegment)^.Head.NextSegment := Segment^.Head.NextSegment;
@@ -572,7 +578,8 @@ If VAR_HeadPtr^.FirstSegment = Segment then
   VAR_HeadPtr^.FirstSegment := Segment^.Head.NextSegment;
 If VAR_HeadPtr^.LastSegment = Segment then
   VAR_HeadPtr^.LastSegment := Segment^.Head.PrevSegment;
-GlobalMemoryFree(Pointer(Segment));
+Temp := Pointer(Segment);
+GlobalMemoryFree(TEmp);
 end;
 
 //==============================================================================
@@ -697,13 +704,13 @@ If (PtrUInt(Entry) > PtrUInt(Segment)) and ((PtrUInt(Entry) < (PtrUInt(Segment) 
                 {$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
                   FillChar(Pointer(PtrUInt(Addr(Entry^.Size)) + PtrUInt(OldSize))^,NewSize - OldSize,0);
                 {$IFDEF FPCDWM}{$POP}{$ENDIF}
-                Entry^.Flags := (Entry^.Flags and not PGV_SEFLAG_SMLSIZE_MASK) or
+                Entry^.Flags := (Entry^.Flags and PGV_SEFLAG_SMLSIZE_MASK_N) or
                   ((UInt32(NewSize) and PGV_SEFLAG_SMLSIZE_SMASK) shl PGV_SEFLAG_SMLSIZE_SHIFT);
               end
             else
               begin
                 // data will be move to heap
-                Entry^.Flags := (Entry^.Flags and not PGV_SEFLAG_SMLSIZE_MASK);
+                Entry^.Flags := Entry^.Flags and PGV_SEFLAG_SMLSIZE_MASK_N;
                 Entry^.Address := GlobalMemoryAllocate(NewSize);
                 Move(Entry^.Size,Entry^.Address^,OldSize);
                 Entry^.Size := NewSize;
@@ -718,7 +725,7 @@ If (PtrUInt(Entry) > PtrUInt(Segment)) and ((PtrUInt(Entry) < (PtrUInt(Segment) 
                 Move(Entry^.Address^,Entry^.Size,NewSize);
                 GlobalMemoryFree(Entry^.Address);
                 Entry^.Address := Addr(Entry^.Size);
-                Entry^.Flags := (Entry^.Flags and not PGV_SEFLAG_SMLSIZE_MASK) or
+                Entry^.Flags := (Entry^.Flags and PGV_SEFLAG_SMLSIZE_MASK_N) or
                   ((UInt32(NewSize) and PGV_SEFLAG_SMLSIZE_SMASK) shl PGV_SEFLAG_SMLSIZE_SHIFT);
               end
             else
@@ -782,13 +789,17 @@ const
 
 //------------------------------------------------------------------------------
 
-Function ProcessGlobalVarsGetHead(Version: Int32): PPGVHead;{$IFDEF Windows} stdcall;{$ELSE} cdecl; public;{$ENDIF}
+Function ProcessGlobalVarsGetHead(Version: Int32): PPGVHead;{$IFDEF Windows} stdcall;{$ELSE} cdecl;{$ENDIF}{$IFDEF FPC} public;{$ENDIF}
 begin
 If Version = PGV_VERSION_CURRENT then
   Result := VAR_HeadPtr
 else
   Result := nil;
 end;
+
+//------------------------------------------------------------------------------
+exports
+  ProcessGlobalVarsGetHead name PGV_EXPORTNAME_GETHEAD;
 
 {===============================================================================
     PGV internal implementation - module initialization
@@ -1004,7 +1015,7 @@ For i := Low(Modules.Arr) to Pred(Modules.Count) do
 
   The head is allocated using global memory allocation routines, but these
   require that the head is already prepared - catch 22. We use local variable
-  to provide what the allocation rutines require.
+  to provide what the allocation rutine require.
 }
 LocalHead.Allocator.AllocFunc := @lin_malloc;
 VAR_HeadPtr := @LocalHead;
@@ -1316,6 +1327,36 @@ try
 finally
   GlobVarUnlock;
 end;
+end;
+
+//------------------------------------------------------------------------------
+
+Function GlobVarTryGet(Identifier: TPGVIdentifier; out Variable: TPGVVariable; out Size: TMemSize): Boolean;
+var
+  Segment:  PPGVSegment;
+  Entry:    PPGVSegmentEntry;
+begin
+Result := False;
+Variable := nil;
+Size := 0;
+GlobVarLock;
+try
+  If EntryFind(Identifier,Segment,Entry) then
+    begin
+      Variable := Addr(Entry^.Address);
+      Size := EntrySize(Entry);
+      Result := True;
+    end;
+finally
+  GlobVarUnlock;
+end;
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarTryGet(const Identifier: String; out Variable: TPGVVariable; out Size: TMemSize): Boolean;
+begin
+Result := GlobVarTryGet(GlobVarTranslateIdentifier(Identifier),Variable,Size);
 end;
 
 //==============================================================================
@@ -1630,44 +1671,12 @@ finally
 end;
 end;
 
-//------------------------------------------------------------------------------
-
-Function GlobVarTryGet(Identifier: TPGVIdentifier; out Variable: TPGVVariable; out Size: TMemSize): Boolean;
-var
-  Segment:  PPGVSegment;
-  Entry:    PPGVSegmentEntry;
-begin
-Result := False;
-Variable := nil;
-Size := 0;
-GlobVarLock;
-try
-  If EntryFind(Identifier,Segment,Entry) then
-    begin
-      Variable := Addr(Entry^.Address);
-      Size := EntrySize(Entry);
-      Result := True;
-    end;
-finally
-  GlobVarUnlock;
-end;
-end;
-
-// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-
-Function GlobVarTryGet(const Identifier: String; out Variable: TPGVVariable; out Size: TMemSize): Boolean;
-begin
-Result := GlobVarTryGet(GlobVarTranslateIdentifier(Identifier),Variable,Size);
-end;
-
 
 {===============================================================================
 --------------------------------------------------------------------------------
-                  Unit exports, initialization and finalization                  
+                      Unit initialization and finalization
 --------------------------------------------------------------------------------
 ===============================================================================}
-exports
-  ProcessGlobalVarsGetHead name PGV_EXPORTNAME_GETHEAD;
 
 initialization
   ModuleInitialization;
