@@ -9,11 +9,78 @@
 
   Process-Global Variables
 
-  
+    This library provides a way of sharing global variables across different
+    modules loaded within single process without a need for explicit
+    cooperation.
 
-  Version 1.0 (2024-__-__)
+    One might ask why is this needed - in the end, all code loaded in one
+    virtual address space can see everything thereof, including not only global
+    variables, but even the local ones and more. This is true, but there are
+    several problems with that, namely:
 
-  Last change 2024-__-__
+         - different modules cannot find some specific variable within the
+           memory without communcating/receiving its address
+
+         - if some variable is to be shared, it must be created only once per
+           entire process and then kept alive the entire time it is needed
+
+         - the variable cannot be statically allocated (ie. defined), because
+           the moment its parent module is unloaded, it dissapears or becomes
+           inaccessible
+
+         - whatewer the implementation, it cannot reference anything within any
+           module (code, data, resources, nothing...), because you never know
+           who created what a who will be unloaded and when (so no classes)
+
+         - allocation cannot be done using integrated memory manager, simply
+           because every module can use a different one and what's more, each
+           is running separately from managers in other modules
+
+    Most of the mentioned problems can be solved by implementing the sharing
+    and allocating mechanism in a separate dynamic library (DLL/SO) - but that
+    is exactly what I wanted to avoid, because it requires that this dynamic
+    library is deployed with every single program or library that uses such
+    system. So this unit implements standalone solution - ne external DLL/SO
+    needed.
+    Another possible solution is also to use memory-mapped files, but that is
+    too heavy for envisioned common use cases (sharing few numbers or maybe
+    some limited resources).
+
+    I will not delve into implementation details (read the code if you are
+    interested and brave enough), but some things need to be clarified...
+
+      To sum what this library does - it allows you to allocate a global
+      variable that can then be found by and accessed in completely different
+      module within the same process. It can be used eg. for sharing information
+      that needs to be global within the entire program.
+
+      Entire interface is procedural (so no objects), see above why. It can
+      be wrapped in classes/objects, but those would be local only to module
+      running them.
+
+      The variables are distinguished and searched for by their numeral
+      identifiers (meaning there is technical limit of about four billion
+      distinct variables).
+      There are functions accepting string identifiers, but those are only
+      for the sake of convenience - the strings are always converted to
+      integers using Alder32 checksum algorithm and these integer values are
+      then used as identifiers. This means, among others, that two different
+      strings can point to the same variable.
+
+      The implementation also contains what is called "internal compatibility
+      version" - only libraries with the same version can share data. This
+      mechanism is here to prevent problems when/if this library changes its
+      internal workings, so libraries with incompatible code do not acces the
+      same internal state and inadvertently corrupt it.
+
+    For more information about this library, refer to description of provided
+    procedural interface and its types.
+
+  Version 1.0 (2024-10-__)
+
+  Internal compatibility version - 0 (zero)
+
+  Last change 2024-10-__
 
   ©2024 František Milt
 
@@ -128,71 +195,401 @@ type
 --------------------------------------------------------------------------------
 ===============================================================================}
 type
+{
+  TPGVIdentifier
+
+  This type is used within this library as a numerical identifier of variables
+  managed here.
+
+  It is always an unsigned 32bit-wide integer (with system endianness). 
+}
   TPGVIdentifier = UInt32;
 
+{
+  TPGVIdentifierArray
+
+  This is only used when enumerating existing variables.
+}
   TPGVIdentifierArray = array of TPGVIdentifier;  // used in enumeration
 
+{
+  TPGVVariable
+
+  This type is used as a reference to existing variables. It is returned by
+  functions searching for or (re)allocating managed variables.
+
+  This type is a two-level pointer (pointer to pointer), meaning it points to
+  a pointer and only that second-level pointer points to memory occupied by the
+  referenced variable. Therefore, to directly access the variable, you have to
+  dereference it twice (eg. SomeVar^^)!
+
+  It is two-level to allow relocation of memory without affecting the reference.
+  For example, you search for some variable you want to use - this reference is
+  returned and you store it for further use. This stored reference will be valid
+  for the entire lifetime of the variable, even if it is reallocated and moved
+  to a different memory address (value of the second-level pointer changes, but
+  the stored reference is still pointing to it).
+
+    WARNING - whenever accessing the variable, use the provided two-level
+              reference, never use the second-level pointer as other threads
+              can change it without you knowing.
+
+    NOTE - unless you are absolutely sure the variable will not be reallocated
+           once it exists, you should lock the state (using GlobVarLock and
+           GlobVarUnlock) when directly accessing the variable (dereferencing
+           it instead of calling GlobVarStore and GlobVarLoad) - this avoids
+           potential problems when the variable is accessed by multiple threads
+           (eg. one thread might reallocate it while other thread is writing
+           something to it - you do NOT want this to happen).
+}
   TPGVVariable = PPointer;
 
 //------------------------------------------------------------------------------
+{
+  GlobVarInternalCompatibilityVersion
 
+  Returns internal compatibility version (an integer number in effect for
+  current implementation).
+
+  This number is used only internally so this call is here only for informative
+  purposes.
+
+    WARNING - in 64bit systems, the highest bit of the result will is set,
+              making the number a large negative integer. This is to separate
+              64bit and 32bit implementations in a case they meet in one
+              process (should not be possible, but better be safe than sorry).
+}
+Function GlobVarInternalCompatibilityVersion: Int32;
+
+{
+  GlobVarTranslateIdentifier
+
+  Converts string identifier to numeral identifier used to distinguish
+  individual variables.
+
+  The string is converted to a WideString (to minimize potential problems with
+  encodings - but even then you should avoid diacritics and non-latin letters)
+  and an Adler32 checksum is calculated for it. This sum is then casted directly
+  to the resulting identifier. This means, among other things, that there is a
+  posibility that two different strings produce the same identifier and
+  therefore, when used, will reference the same variable - be aware of this.
+
+  String identifiers are case sensitive ("abc" is NOT the same as "ABC").
+
+    NOTE - further functions that are accepting string identifiers are calling
+           this routine to convert the provided string. Although the Adler32
+           checksum is fast, the effect of calculating it many times over might
+           be noticeable. Therefore, in case you make a lot of calls with the
+           same string identifier, you should consider converting it to numeral
+           identifier at the start and then use only this numeral instead of
+           the string.
+}
 Function GlobVarTranslateIdentifier(const Identifier: String): TPGVIdentifier;{$IF Defined(FPC) and Defined(CanInline)} inline;{$IFEND}
 
 //------------------------------------------------------------------------------
+{
+  GlobVarLock
 
+  Locks internal state of this library for the calling thread, making sure no
+  other thread(s) can manipulate it while the lock is in effect. This lock is
+  process-wide.
+
+  It can be called multiple times, but each call to it must be paired by a call
+  to GlobVarUnlock to unlock the state when you are done using it.
+
+  If one thread holds the lock, all attempts to acquire the lock from other
+  threads will block until the lock is released.
+
+  All functions declared in this procedural interface, with notable exceptions
+  being these:
+
+      GlobVarInternalCompatibilityVersion
+      GlobVarTranslateIdentifier
+
+  ...are acquiring the lock during their execution. This means that all these
+  functions are serialized (ie. only one call can be executed at a time).
+
+  It is here mainly to protect the state when making complex operations
+  involving multiple calls to interface functions. Let's have an example:
+
+      GlobVarLock;
+      try
+        If GlobVarFind('abc',Ptr) then
+          begin
+            If GlobVarSize('abc') <> 1 then
+              Ptr := GlobVarRealloc('abc',1);
+          end
+        else Ptr := GlobVarAlloc('abc',1);
+        Boolean(Ptr^^) := True;
+      finally
+        GlobVarUnlock;
+      end;
+
+  ...this all will be executed in a thread safe manner. It can also be used
+  to protect individual variables when accesing them directly, without using
+  provided load and store functions (which are serialized too).
+}
 procedure GlobVarLock;
+
+{
+  GlobVarUnlock
+
+  Unlocks the internal state. This function must be called as many times as
+  GlobVarLock was called to achieve proper unlocking.
+}
 procedure GlobVarUnlock;
 
+//------------------------------------------------------------------------------
+{
+  GlobVarCount
+
+  Returns number of variables managed by this library.
+}
 Function GlobVarCount: Integer;
 
+{
+  GlobVarMemory
+
+  Returs an amount of memory (number of bytes) used by this library and
+  allocated variables.
+
+  When IncludeOverhead is False, then only memory used by the variables (all
+  of them, including those stored in-situ - see GlobVarHeapStored for
+  explanation) is returned.
+  When set to True, then it returns size of all memory allocated for internal
+  state plus memory allocated on the heap for individual variables (note that
+  variables stored in the state are not counted, as their memory is already
+  included as part of the state itself).
+}
 Function GlobVarMemory(IncludeOverhead: Boolean = False): TMemSize;
 
+{
+  GlobVarEnumerate
+
+  Returns an array enumerating identifiers of all managed variables (an empty
+  array is returned if no variable is present).
+}
 Function GlobVarEnumerate: TPGVIdentifierArray;
 
 //------------------------------------------------------------------------------
+{
+  GlobVarFind
 
-Function GlobVarExists(Identifier: TPGVIdentifier): Boolean; overload;
-Function GlobVarExists(const Identifier: String): Boolean; overload;{$IFDEF CanInline} inline;{$ENDIF}
+  Searches the internal state for a variable of given identifier.
 
+  When it is found, then True is returned, output parameter Variable contains
+  its reference and Size contains actual size of it.
+  If not found then False is returned, Variable is set to nil and Size to zero.
+}
 Function GlobVarFind(Identifier: TPGVIdentifier; out Variable: TPGVVariable): Boolean; overload;
 Function GlobVarFind(const Identifier: String; out Variable: TPGVVariable): Boolean; overload;{$IFDEF CanInline} inline;{$ENDIF}
 
+Function GlobVarFind(Identifier: TPGVIdentifier; out Variable: TPGVVariable; out Size: TMemSize): Boolean; overload;
+Function GlobVarFind(const Identifier: String; out Variable: TPGVVariable; out Size: TMemSize): Boolean; overload;{$IFDEF CanInline} inline;{$ENDIF}
+
+type
+{
+  TPVGGetResult
+
+  Type used by some overloads of function GlobVarGet to inform the caller
+  about the result of operation.
+
+    vgrCreated      - requested variable have not existed prior the call and
+                      was allocated by it
+    vgrOpened       - variable existed and its size matched the requested one
+    vgrSizeMismatch - variable exists but its size do not match
+    vgrError        - some unspecified error occured
+}
+  TPVGGetResult = (vgrCreated,vgrOpened,vgrSizeMismatch,vgrError);
+  
+{
+  GlobVarGet
+
+  First version (overloads returning type TPGVVariable)
+
+    Returns a reference to variable of given identifier. If the variable cannot
+    be found, then these functions raise an EPGVUnknownVariable exception.
+
+  Second version (returning type TPVGGetResult)
+
+    Tries to find variable of given identifier. If it is not found, then it
+    allocates it.
+
+    When the wanted variable exists, its size is compared to whatever is given
+    in parameter Size. If they match, then parameter Size is left unchanged,
+    output parameter Variable is set to a reference to the existing variable
+    and result is set to vgrOpened. If the sizes do not match, then parameter
+    Size is set to actual size of the variable, Variable is nil and result is
+    set to vgrSizeMismatch.
+
+    If variable of given identifier does not exist, then it is allocated using
+    Size parameter (this parameter is not changed). Variable then contains
+    reference to the newly created entry and result is set to vgrCreated.
+
+    If these functions return vgrError, then value of Size and Variable is
+    undefined (but this result should not be ever returned, as exceptions are
+    raised on errors).
+}
 Function GlobVarGet(Identifier: TPGVIdentifier): TPGVVariable; overload;
 Function GlobVarGet(const Identifier: String): TPGVVariable; overload;
 
-Function GlobVarTryGet(Identifier: TPGVIdentifier; out Variable: TPGVVariable; out Size: TMemSize): Boolean; overload;
-Function GlobVarTryGet(const Identifier: String; out Variable: TPGVVariable; out Size: TMemSize): Boolean; overload;{$IFDEF CanInline} inline;{$ENDIF}
+Function GlobVarGet(Identifier: TPGVIdentifier; var Size: TMemSize; out Variable: TPGVVariable): TPVGGetResult; overload;
+Function GlobVarGet(const Identifier: String; var Size: TMemSize; out Variable: TPGVVariable): TPVGGetResult; overload;{$IFDEF CanInline} inline;{$ENDIF}
 
 //------------------------------------------------------------------------------
+{
+  GlobVarExists
 
+  Indicates whether the requested variable exists. When it exists, it will
+  return true, when it does not exist, then it will return false.
+}
+Function GlobVarExists(Identifier: TPGVIdentifier): Boolean; overload;
+Function GlobVarExists(const Identifier: String): Boolean; overload;{$IFDEF CanInline} inline;{$ENDIF}
+
+{
+  GlobVarSize
+
+  Returns size of variable identified by the given identifier.
+
+  If the requested variable does not exist, then an EPGVUnknownVariable
+  exception will be raised.
+
+    NOTE - existing variables cannot have zero size.
+}
 Function GlobVarSize(Identifier: TPGVIdentifier): TMemSize; overload;
 Function GlobVarSize(const Identifier: String): TMemSize; overload;
 
+{
+  GlobVarHeapStored
+
+  Indicates whether the given variable is stored on the heap (true is returned)
+  or in-situ (false is returned).
+
+  Variables stored on the heap reside in a memory that is obtained from
+  (allocated by) a global memory manager (usually provided by operating system
+  or system library).
+  To limit memory fragmentation and use of resources, small variables (smaller
+  or equal in size to a pointer) are stored directly in the internal state that
+  manages those variables (this is called in-situ).
+
+    WARNING  - Abovementioned means you should never assume anything about
+               position of any variable in memory and certainly avoid writing
+               outside its boundaries (you could corrupt the state).
+}
 Function GlobVarHeapStored(Identifier: TPGVIdentifier): Boolean; overload;
 Function GlobVarHeapStored(const Identifier: String): Boolean; overload;
 
 //------------------------------------------------------------------------------
+{
+  GlobVarAllocate
+  GlobVarAlloc
 
+  Allocates variable of given identifier and size.
+
+  If variable with given identifier already exists, then an exception of class
+  EPGVDuplicateVariable is raised.
+
+  If size is set to zero, then no variable is allocated and the function will
+  return nil.
+
+  Memory of the newly allocated variable is initialized to all zero.
+}
 Function GlobVarAllocate(Identifier: TPGVIdentifier; Size: TMemSize): TPGVVariable; overload;
 Function GlobVarAllocate(const Identifier: String; Size: TMemSize): TPGVVariable; overload;
 
 Function GlobVarAlloc(Identifier: TPGVIdentifier; Size: TMemSize): TPGVVariable; overload;{$IFDEF CanInline} inline;{$ENDIF}
 Function GlobVarAlloc(const Identifier: String; Size: TMemSize): TPGVVariable; overload;{$IFDEF CanInline} inline;{$ENDIF}
 
+{
+  GlobVarReallocate
+  GlobVarRealloc
+
+  Operation of these functions depends on whether the requested variable exists
+  and also on the value of paramer NewSize.
+
+  Variable exists
+
+    If NewSize is above zero, then the variable is reallocated. If NewSize is
+    the same as current size, then this reallocation does nothing. If NewSize
+    is larger than current size, then the newly added memory space is zeroed.
+    And finally, if NewSize is smaller than current size, then the data are
+    truncated to fit the new size.
+
+    When NewSize is zero then the variable is freed (equivalent to calling
+    GlobVarFree).
+
+      NOTE - when the reallocation is performed, the variable's data might be
+             relocated to a different memory address (whether this happens or
+             not depends on many things, none of which is important here, you
+             just remember that it CAN happen).
+
+  Variable does not exist
+
+    If NewSize is above zero, then new variable of given identifier and size is
+    allocated (equivalent to calling GlobVarAllocate).
+
+    When NewSize is zero, then nil is returned.
+}
 Function GlobVarReallocate(Identifier: TPGVIdentifier; NewSize: TMemSize): TPGVVariable; overload;
 Function GlobVarReallocate(const Identifier: String; NewSize: TMemSize): TPGVVariable; overload;{$IFDEF CanInline} inline;{$ENDIF}
 
 Function GlobVarRealloc(Identifier: TPGVIdentifier; NewSize: TMemSize): TPGVVariable; overload;{$IFDEF CanInline} inline;{$ENDIF}
 Function GlobVarRealloc(const Identifier: String; NewSize: TMemSize): TPGVVariable; overload;{$IFDEF CanInline} inline;{$ENDIF}
 
+{
+  GlobVarFree
+
+  Frees memory allocated for a given variable and removes it from the internal
+  state - so it cannot be obtained or accessed again.
+
+  If no variable of given name exists, then an EPGVUnknownVariable exception is
+  raised.
+
+    WARNING - if you still have references to removed variables, they will be
+              corrupted, or, in the worst case, will point to a different
+              variable. Therefore make sure you discard all existing references
+              to variable that is being freed.
+}
 procedure GlobVarFree(Identifier: TPGVIdentifier); overload;
 procedure GlobVarFree(const Identifier: String); overload;
 
 //------------------------------------------------------------------------------
+{
+  GlobVarStore
 
+  Writes up-to Count bytes from the provided buffer (Buffer) to a memory of
+  variable identified by the Identifier.
+
+  If the variable is smaller than is Count, then only number of bytes
+  corresponding to actual variable's size will be written.
+
+  If the variable is larger than is the Count, then bytes beyond the Count are
+  not affected.
+
+    NOTE - this function locks the internal state while writing, so you do not
+           need to do it explicitly.
+}
 Function GlobVarStore(Identifier: TPGVIdentifier; const Buffer; Count: TMemSize): TMemSize; overload;
 Function GlobVarStore(const Identifier: String; const Buffer; Count: TMemSize): TMemSize; overload;
 
+{
+  GlobVarLoad
+
+  Reads up to Count bytes from the requested variable into the provided Buffer.
+  The buffer must be prepared by the caller and must be large enough to hold
+  Count number of bytes.
+
+  If the variable is smaller than is Count, then only number of bytes
+  corresponding to actual variable's size will be read. Content of buffer
+  beyond actually copied data is unaffected.
+
+  If the variable is larger than is the Count, then only Count bytes will be
+  read (filling the buffer), data beyond that are not copied and are not
+  affected (but in rare circumstances might be read by the function).
+
+    NOTE - this function locks the internal state while reading, so you do not
+           need to do it explicitly.
+}
 Function GlobVarLoad(Identifier: TPGVIdentifier; out Buffer; Count: TMemSize): TMemSize; overload;
 Function GlobVarLoad(const Identifier: String; out Buffer; Count: TMemSize): TMemSize; overload;
 
@@ -1131,6 +1528,13 @@ end;
     PGV public interface implementation - main implementation
 ===============================================================================}
 
+Function GlobVarInternalCompatibilityVersion: Int32;
+begin
+Result := PGV_VERSION_CURRENT;
+end;
+
+//------------------------------------------------------------------------------
+
 Function GlobVarTranslateIdentifier(const Identifier: String): TPGVIdentifier;
 begin
 Result := TPGVIdentifier(WideStringAdler32(StrToWide(Identifier)));
@@ -1147,10 +1551,10 @@ end;
 
 procedure GlobVarUnlock;
 begin
-ThreadUnlock
+ThreadUnlock;
 end;
 
-//------------------------------------------------------------------------------
+//==============================================================================
 
 Function GlobVarCount: Integer;
 var
@@ -1245,28 +1649,6 @@ end;
 
 //==============================================================================
 
-Function GlobVarExists(Identifier: TPGVIdentifier): Boolean;
-var
-  Segment:  PPGVSegment;
-  Entry:    PPGVSegmentEntry;
-begin
-GlobVarLock;
-try
-  Result := EntryFind(Identifier,Segment,Entry);
-finally
-  GlobVarUnlock;
-end;
-end;
-
-// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-
-Function GlobVarExists(const Identifier: String): Boolean;
-begin
-Result := GlobVarExists(GlobVarTranslateIdentifier(Identifier));
-end;
-
-//------------------------------------------------------------------------------
-
 Function GlobVarFind(Identifier: TPGVIdentifier; out Variable: TPGVVariable): Boolean;
 var
   Segment:  PPGVSegment;
@@ -1289,6 +1671,36 @@ end;
 Function GlobVarFind(const Identifier: String; out Variable: TPGVVariable): Boolean;
 begin
 Result := GlobVarFind(GlobVarTranslateIdentifier(Identifier),Variable);
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarFind(Identifier: TPGVIdentifier; out Variable: TPGVVariable; out Size: TMemSize): Boolean;
+var
+  Segment:  PPGVSegment;
+  Entry:    PPGVSegmentEntry;
+begin
+Result := False;
+Variable := nil;
+Size := 0;
+GlobVarLock;
+try
+  If EntryFind(Identifier,Segment,Entry) then
+    begin
+      Variable := Addr(Entry^.Address);
+      Size := EntrySize(Entry);
+      Result := True;
+    end;
+finally
+  GlobVarUnlock;
+end;
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarFind(const Identifier: String; out Variable: TPGVVariable; out Size: TMemSize): Boolean;
+begin
+Result := GlobVarFind(GlobVarTranslateIdentifier(Identifier),Variable,Size);
 end;
 
 //------------------------------------------------------------------------------
@@ -1329,23 +1741,43 @@ finally
 end;
 end;
 
-//------------------------------------------------------------------------------
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
-Function GlobVarTryGet(Identifier: TPGVIdentifier; out Variable: TPGVVariable; out Size: TMemSize): Boolean;
+Function GlobVarGet(Identifier: TPGVIdentifier; var Size: TMemSize; out Variable: TPGVVariable): TPVGGetResult;
 var
   Segment:  PPGVSegment;
   Entry:    PPGVSegmentEntry;
+  CurrSize: TMemSize;
 begin
-Result := False;
 Variable := nil;
-Size := 0;
+Result := vgrError;
 GlobVarLock;
 try
   If EntryFind(Identifier,Segment,Entry) then
     begin
-      Variable := Addr(Entry^.Address);
-      Size := EntrySize(Entry);
-      Result := True;
+      // entry exists, check its size and act accordingly
+      CurrSize := EntrySize(Entry);
+      If Size = CurrSize then
+        begin
+          Variable := Addr(Entry^.Address);
+          Result := vgrOpened;
+        end
+      else
+        begin
+          Size := CurrSize;
+          Result := vgrSizeMismatch;
+        end;
+    end
+  else
+    begin
+      // entry does not exist, allocate it
+      If Size > 0 then
+        begin
+          EntryAllocate(Identifier,Size,Segment,Entry);
+          Variable := Addr(Entry^.Address);
+          Result := vgrCreated;
+          // size does not change
+        end;
     end;
 finally
   GlobVarUnlock;
@@ -1354,12 +1786,34 @@ end;
 
 // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
-Function GlobVarTryGet(const Identifier: String; out Variable: TPGVVariable; out Size: TMemSize): Boolean;
+Function GlobVarGet(const Identifier: String; var Size: TMemSize; out Variable: TPGVVariable): TPVGGetResult;
 begin
-Result := GlobVarTryGet(GlobVarTranslateIdentifier(Identifier),Variable,Size);
+Result := GlobVarGet(GlobVarTranslateIdentifier(Identifier),Size,Variable);
 end;
 
 //==============================================================================
+
+Function GlobVarExists(Identifier: TPGVIdentifier): Boolean;
+var
+  Segment:  PPGVSegment;
+  Entry:    PPGVSegmentEntry;
+begin
+GlobVarLock;
+try
+  Result := EntryFind(Identifier,Segment,Entry);
+finally
+  GlobVarUnlock;
+end;
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarExists(const Identifier: String): Boolean;
+begin
+Result := GlobVarExists(GlobVarTranslateIdentifier(Identifier));
+end;
+
+//------------------------------------------------------------------------------
 
 Function GlobVarSize(Identifier: TPGVIdentifier): TMemSize;
 var
