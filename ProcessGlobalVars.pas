@@ -19,7 +19,7 @@
     several problems with that, namely:
 
          - different modules cannot find some specific variable within the
-           memory without communcating/receiving its address
+           memory without communicating/receiving its address
 
          - if some variable is to be shared, it must be created only once per
            entire process and then kept alive the entire time it is needed
@@ -40,14 +40,15 @@
     and allocating mechanism in a separate dynamic library (DLL/SO) - but that
     is exactly what I wanted to avoid, because it requires that this dynamic
     library is deployed with every single program or library that uses such
-    system. So this unit implements standalone solution - ne external DLL/SO
+    system. This unit implements standalone solution - ne external DLL/SO is
     needed.
     Another possible solution is also to use memory-mapped files, but that is
     too heavy for envisioned common use cases (sharing few numbers or maybe
     some limited resources).
 
     I will not delve into implementation details (read the code if you are
-    interested and brave enough), but some things need to be clarified...
+    interested and brave enough - note that the mechanisms used are the same
+    both in Windows and Linux), but some things need to be clarified...
 
       To sum what this library does - it allows you to allocate a global
       variable that can then be found by and accessed in completely different
@@ -76,11 +77,11 @@
     For more information about this library, refer to description of provided
     procedural interface and its types.
 
-  Version 1.0 (2024-10-__)
+  Version 1.0 (2024-10-03)
 
   Internal compatibility version - 0 (zero)
 
-  Last change 2024-10-__
+  Last change 2024-10-03
 
   ©2024 František Milt
 
@@ -180,11 +181,13 @@ type
   EPGVModuleEnumerationError = class(EPGVException);
   EPGVModuleCleanupError     = class(EPGVException);
 
-  EPGVHeapAllocationError    = class(EPGVException);
+  EPGVHeapAllocationError = class(EPGVException);
 
-  EPGVInvalidValue           = class(EPGVException);
-  EPGVUnknownVariable        = class(EPGVException);
-  EPGVDuplicateVariable      = class(EPGVException);
+  EPGVInvalidValue      = class(EPGVException);
+  EPGVInvalidState      = class(EPGVException);
+  EPGVInvalidVariable   = class(EPGVException);
+  EPGVUnknownVariable   = class(EPGVException);
+  EPGVDuplicateVariable = class(EPGVException);
 
   EPGVMutexError  = class(EPGVException);
   EPGVSystemError = class(EPGVException);
@@ -210,13 +213,13 @@ type
 
   This is only used when enumerating existing variables.
 }
-  TPGVIdentifierArray = array of TPGVIdentifier;  // used in enumeration
+  TPGVIdentifierArray = array of TPGVIdentifier; 
 
 {
   TPGVVariable
 
   This type is used as a reference to existing variables. It is returned by
-  functions searching for or (re)allocating managed variables.
+  functions searching for and/or (re)allocating managed variables.
 
   This type is a two-level pointer (pointer to pointer), meaning it points to
   a pointer and only that second-level pointer points to memory occupied by the
@@ -241,8 +244,24 @@ type
            potential problems when the variable is accessed by multiple threads
            (eg. one thread might reallocate it while other thread is writing
            something to it - you do NOT want this to happen).
+
+  Note on functions accepting parameter of type TPGVVariable as their input...
+
+    All functions operating on variables that accept either numeral or string
+    identifiers have one unfortunate thing in common - everytime they are
+    called, they search the entire internal state for the requested variable,
+    and this searching cannot be much optimized.
+
+    To improve preformance, you can call functions accepting direct variable
+    reference (provided you already have it, eg. from allocation) - these
+    functions are not searching the state, but insteady operate directly on the
+    provided memory reference. That being said, make sure you provide a valid
+    reference (if nil is passed, then these functions just raise an exception
+    of class EPGVInvalidValue, if non-nil invalid pointer is used, then better
+    be ready for nasty bugs).
 }
   TPGVVariable = PPointer;
+  PPGVVariable = ^TPGVVariable;
 
 //------------------------------------------------------------------------------
 {
@@ -268,7 +287,7 @@ Function GlobVarInternalCompatibilityVersion: Int32;
   individual variables.
 
   The string is converted to a WideString (to minimize potential problems with
-  encodings - but even then you should avoid diacritics and non-latin letters)
+  encodings - but even then you should avoid diacritics and non-latin glyphs)
   and an Adler32 checksum is calculated for it. This sum is then casted directly
   to the resulting identifier. This means, among other things, that there is a
   posibility that two different strings produce the same identifier and
@@ -350,7 +369,7 @@ Function GlobVarCount: Integer;
 {
   GlobVarMemory
 
-  Returs an amount of memory (number of bytes) used by this library and
+  Returs an amount of global memory (number of bytes) used by this library and
   allocated variables.
 
   When IncludeOverhead is False, then only memory used by the variables (all
@@ -449,21 +468,28 @@ Function GlobVarExists(const Identifier: String): Boolean; overload;{$IFDEF CanI
 {
   GlobVarSize
 
-  Returns size of variable identified by the given identifier.
+  Returns size of the given variable.
 
   If the requested variable does not exist, then an EPGVUnknownVariable
-  exception will be raised.
+  exception will be raised (overloads accepting indetifier).
 
-    NOTE - existing variables cannot have zero size.
+    NOTE - existing variables cannot have size of zero.
+
+  Overload accepting variable reference can also raise an EPGVInvalidVariable
+  exception if the reference is not valid.
 }
 Function GlobVarSize(Identifier: TPGVIdentifier): TMemSize; overload;
 Function GlobVarSize(const Identifier: String): TMemSize; overload;
+Function GlobVarSize(Variable: TPGVVariable): TMemSize; overload;
 
 {
   GlobVarHeapStored
 
   Indicates whether the given variable is stored on the heap (true is returned)
   or in-situ (false is returned).
+
+  If the requested variable does not exist, then an EPGVUnknownVariable
+  exception will be raised (overloads accepting indetifier).
 
   Variables stored on the heap reside in a memory that is obtained from
   (allocated by) a global memory manager (usually provided by operating system
@@ -475,9 +501,86 @@ Function GlobVarSize(const Identifier: String): TMemSize; overload;
     WARNING  - Abovementioned means you should never assume anything about
                position of any variable in memory and certainly avoid writing
                outside its boundaries (you could corrupt the state).
+
+  Overload accepting variable reference can also raise an EPGVInvalidVariable
+  exception if the reference is not valid.
 }
 Function GlobVarHeapStored(Identifier: TPGVIdentifier): Boolean; overload;
 Function GlobVarHeapStored(const Identifier: String): Boolean; overload;
+Function GlobVarHeapStored(Variable: TPGVVariable): Boolean; overload;
+
+//------------------------------------------------------------------------------
+{
+  GlobVarRefCount
+
+  Returns current reference count of given variable.
+
+  If the requested variable does not exist, then an EPGVUnknownVariable
+  exception will be raised (overloads accepting indetifier).
+
+  Overload accepting variable reference can also raise an EPGVInvalidVariable
+  exception if the reference is not valid.
+
+  Reference counting overview
+
+    Reference counting of individual variables is NOT automatic - it is provided
+    only to help with variable lifetime in multi-threaded and multi-module
+    environment, where implementation cannot be sure whether it can free the
+    variable or not (ie. whether it is still used by someone).
+
+      WARNING - other functions operating on variables, other than those
+                explicitly accessing reference count, completely ignore it,
+                it is provided only for user code convenience.
+
+    When a new variable is allocated, its reference count is set to zero.
+
+    To increment or decrement it, you need to call funtions GlobVarAcquire or
+    GlobVarRelease respectively.
+
+    GlobVarRelease can be also used to automatically free the variable when
+    its reference count drops to zero - see there for details.
+}
+Function GlobVarRefCount(Identifier: TPGVIdentifier): UInt32; overload;
+Function GlobVarRefCount(const Identifier: String): UInt32; overload;
+Function GlobVarRefCount(Variable: TPGVVariable): UInt32; overload;
+
+{
+  GlobVarAcquire
+
+  Increments reference count of the given variable by one and returns the new
+  count. Nothing else is changed about the variable.
+
+  If the requested variable does not exist, then an EPGVUnknownVariable
+  exception will be raised (overloads accepting indetifier).
+
+  Overload accepting variable reference can also raise an EPGVInvalidVariable
+  exception if the reference is not valid.
+
+  If the reference count is already at High(UInt32), then an EPGVInvalidState
+  exception is raised.    
+}
+Function GlobVarAcquire(Identifier: TPGVIdentifier): UInt32; overload;
+Function GlobVarAcquire(const Identifier: String): UInt32; overload;
+Function GlobVarAcquire(Variable: TPGVVariable): UInt32; overload;
+
+{
+  GlobVarRelease
+
+  Decrements reference count of the given variable by one and returns it new
+  value. If the count already is zero, then it is not decremented.
+
+  If the reference count drops to zero or already is zero and argument CanFree
+  is set to True, then the function also frees and removes the variable before
+  returning (equivalent to calling GlobVarFree).
+
+  If the requested variable does not exist, then an EPGVUnknownVariable
+  exception will be raised.
+
+  Note that overload accepting variable reference is not provided because
+  the reference cannot provide all information necessary for freeing.
+}
+Function GlobVarRelease(Identifier: TPGVIdentifier; CanFree: Boolean = True): UInt32; overload;
+Function GlobVarRelease(const Identifier: String; CanFree: Boolean = True): UInt32; overload;
 
 //------------------------------------------------------------------------------
 {
@@ -490,7 +593,8 @@ Function GlobVarHeapStored(const Identifier: String): Boolean; overload;
   EPGVDuplicateVariable is raised.
 
   If size is set to zero, then no variable is allocated and the function will
-  return nil.
+  return nil (note that even in this case, the function will raise an exception
+  if the variable already exists).
 
   Memory of the newly allocated variable is initialized to all zero.
 }
@@ -516,7 +620,7 @@ Function GlobVarAlloc(const Identifier: String; Size: TMemSize): TPGVVariable; o
     truncated to fit the new size.
 
     When NewSize is zero then the variable is freed (equivalent to calling
-    GlobVarFree).
+    GlobVarFree - variable's reference count is ignored).
 
       NOTE - when the reallocation is performed, the variable's data might be
              relocated to a different memory address (whether this happens or
@@ -549,6 +653,9 @@ Function GlobVarRealloc(const Identifier: String; NewSize: TMemSize): TPGVVariab
               corrupted, or, in the worst case, will point to a different
               variable. Therefore make sure you discard all existing references
               to variable that is being freed.
+
+    WARNING - this function ignores variable's reference count and always
+              frees it.
 }
 procedure GlobVarFree(Identifier: TPGVIdentifier); overload;
 procedure GlobVarFree(const Identifier: String); overload;
@@ -558,7 +665,10 @@ procedure GlobVarFree(const Identifier: String); overload;
   GlobVarStore
 
   Writes up-to Count bytes from the provided buffer (Buffer) to a memory of
-  variable identified by the Identifier.
+  given variable.
+
+  If the requested variable does not exist, then an EPGVUnknownVariable
+  exception will be raised (overloads accepting indetifier).
 
   If the variable is smaller than is Count, then only number of bytes
   corresponding to actual variable's size will be written.
@@ -566,18 +676,25 @@ procedure GlobVarFree(const Identifier: String); overload;
   If the variable is larger than is the Count, then bytes beyond the Count are
   not affected.
 
+  Overload accepting variable reference can also raise an EPGVInvalidVariable
+  exception if the reference is not valid.
+
     NOTE - this function locks the internal state while writing, so you do not
            need to do it explicitly.
 }
 Function GlobVarStore(Identifier: TPGVIdentifier; const Buffer; Count: TMemSize): TMemSize; overload;
 Function GlobVarStore(const Identifier: String; const Buffer; Count: TMemSize): TMemSize; overload;
+Function GlobVarStore(Variable: TPGVVariable; const Buffer; Count: TMemSize): TMemSize; overload;
 
 {
   GlobVarLoad
 
   Reads up to Count bytes from the requested variable into the provided Buffer.
   The buffer must be prepared by the caller and must be large enough to hold
-  Count number of bytes.
+  at least Count number of bytes.
+
+  If the requested variable does not exist, then an EPGVUnknownVariable
+  exception will be raised (overloads accepting indetifier).
 
   If the variable is smaller than is Count, then only number of bytes
   corresponding to actual variable's size will be read. Content of buffer
@@ -587,11 +704,15 @@ Function GlobVarStore(const Identifier: String; const Buffer; Count: TMemSize): 
   read (filling the buffer), data beyond that are not copied and are not
   affected (but in rare circumstances might be read by the function).
 
+  Overload accepting variable reference can also raise an EPGVInvalidVariable
+  exception if the reference is not valid.
+
     NOTE - this function locks the internal state while reading, so you do not
            need to do it explicitly.
 }
 Function GlobVarLoad(Identifier: TPGVIdentifier; out Buffer; Count: TMemSize): TMemSize; overload;
 Function GlobVarLoad(const Identifier: String; out Buffer; Count: TMemSize): TMemSize; overload;
+Function GlobVarLoad(Variable: TPGVVariable; out Buffer; Count: TMemSize): TMemSize; overload;
 
 implementation
 
@@ -602,6 +723,7 @@ uses
 {$IFDEF FPC_DisableWarns}
   {$DEFINE FPCDWM}
   {$DEFINE W4055:={$WARN 4055 OFF}} // Conversion between ordinals and pointers is not portable
+  {$DEFINE W4056:={$WARN 4056 OFF}} // Conversion between ordinals and pointers is not portable
 {$ENDIF}
 
 {===============================================================================
@@ -644,6 +766,7 @@ type
   TPGVSegmentEntry = packed record
     Identifier: TPGVIdentifier;
     Flags:      UInt32;
+    RefCount:   UInt32;
     Address:    Pointer;
     Size:       TMemSize;    
   end;
@@ -981,12 +1104,28 @@ end;
 
 //==============================================================================
 
+Function EntryFromVar(Variable: TPGVVariable): PPGVSegmentEntry;
+begin
+{$IFDEF FPCDWM}{$PUSH}W4055 W4056{$ENDIF}
+Result := PPGVSegmentEntry(Pointer(PtrUInt(Variable) - PtrUInt(Addr(TPGVSegmentEntry(nil^).Address))));
+{$IFDEF FPCDWM}{$POP}{$ENDIF}
+end;
+
+//------------------------------------------------------------------------------
+
 Function EntrySize(Entry: PPGVSegmentEntry): TMemSize;
 begin
 If (Entry^.Flags and PGV_SEFLAG_SMLSIZE_MASK) <> 0 then
   Result := TMemSize((Entry^.Flags shr PGV_SEFLAG_SMLSIZE_SHIFT) and PGV_SEFLAG_SMLSIZE_SMASK)
 else
   Result := Entry^.Size;
+end;
+
+//------------------------------------------------------------------------------
+
+Function EntryIsValid(Entry: PPGVSegmentEntry): Boolean;
+begin
+Result := ((Entry^.Flags and PGV_SEFLAG_USED) <> 0) and Assigned(Entry^.Address) and (EntrySize(Entry) <> 0);
 end;
 
 //------------------------------------------------------------------------------
@@ -1057,6 +1196,7 @@ If not Assigned(Segment) or not Assigned(Entry) then
 // allocate the entry
 Entry^.Identifier := Identifier;
 Entry^.Flags := PGV_SEFLAG_USED;
+Entry^.RefCount := 0;
 If Size <= SizeOf(TMemSize) then
   begin
     // do not allocate on heap, the variable can fit into entry's Size field
@@ -1159,6 +1299,7 @@ If (PtrUInt(Entry) > PtrUInt(Segment)) and ((PtrUInt(Entry) < (PtrUInt(Segment) 
     If (Entry^.Flags or PGV_SEFLAG_SMLSIZE_MASK) = 0 then
       GlobalMemoryFree(Entry^.Address); // sets the address to nil
     Entry^.Flags := 0;
+    Entry^.RefCount := 0;
     Entry^.Identifier := 0;
     // update segment
     Dec(Segment^.Head.AllocCount);
@@ -1851,6 +1992,29 @@ finally
 end;
 end;
 
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarSize(Variable: TPGVVariable): TMemSize;
+var
+  Entry:  PPGVSegmentEntry;
+begin
+Result := 0;
+If Assigned(Variable) then
+  begin
+    GlobVarLock;
+    try
+      Entry := EntryFromVar(Variable);
+      If EntryIsValid(Entry) then
+        Result := EntrySize(Entry)
+      else
+        raise EPGVInvalidVariable.Create('GlobVarSize: Invalid variable entry.');
+    finally
+      GlobVarUnlock;
+    end;
+  end
+else raise EPGVInvalidValue.Create('GlobVarSize: Nil variable reference.');
+end;
+
 //------------------------------------------------------------------------------
 
 Function GlobVarHeapStored(Identifier: TPGVIdentifier): Boolean;
@@ -1884,6 +2048,217 @@ try
     Result := (Entry^.Flags and PGV_SEFLAG_SMLSIZE_MASK) = 0
   else
     raise EPGVUnknownVariable.CreateFmt('GlobVarHeapStored: Unknown variable "%s".',[Identifier]);
+finally
+  GlobVarUnlock;
+end;
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarHeapStored(Variable: TPGVVariable): Boolean;
+var
+  Entry:  PPGVSegmentEntry;
+begin
+Result := False;
+If Assigned(Variable) then
+  begin
+    GlobVarLock;
+    try
+      Entry := EntryFromVar(Variable);
+      If EntryIsValid(Entry) then
+        Result := (Entry^.Flags and PGV_SEFLAG_SMLSIZE_MASK) = 0
+      else
+        raise EPGVInvalidVariable.Create('GlobVarHeapStored: Invalid variable entry.');
+    finally
+      GlobVarUnlock;
+    end;
+  end
+else raise EPGVInvalidValue.Create('GlobVarHeapStored: Nil variable reference.');
+end;
+
+//==============================================================================
+
+Function GlobVarRefCount(Identifier: TPGVIdentifier): UInt32;
+var
+  Segment:  PPGVSegment;
+  Entry:    PPGVSegmentEntry;
+begin
+Result := 0;
+GlobVarLock;
+try
+  If EntryFind(Identifier,Segment,Entry) then
+    Result := Entry^.RefCount
+  else
+    raise EPGVUnknownVariable.CreateFmt('GlobVarRefCount: Unknown variable "%s".',[Identifier]);
+finally
+  GlobVarUnlock;
+end;
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarRefCount(const Identifier: String): UInt32;
+var
+  Segment:  PPGVSegment;
+  Entry:    PPGVSegmentEntry;
+begin
+Result := 0;
+GlobVarLock;
+try
+  If EntryFind(GlobVarTranslateIdentifier(Identifier),Segment,Entry) then
+    Result := Entry^.RefCount
+  else
+    raise EPGVUnknownVariable.CreateFmt('GlobVarRefCount: Unknown variable "%s".',[Identifier]);
+finally
+  GlobVarUnlock;
+end;
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarRefCount(Variable: TPGVVariable): UInt32;
+var
+  Entry:  PPGVSegmentEntry;
+begin
+Result := 0;
+If Assigned(Variable) then
+  begin
+    GlobVarLock;
+    try
+      Entry := EntryFromVar(Variable);
+      If EntryIsValid(Entry) then
+        Result := Entry^.RefCount
+      else
+        raise EPGVInvalidVariable.Create('GlobVarRefCount: Invalid variable entry.');
+    finally
+      GlobVarUnlock;
+    end;
+  end
+else raise EPGVInvalidValue.Create('GlobVarRefCount: Nil variable reference.');
+end;
+
+//------------------------------------------------------------------------------
+
+Function GlobVarAcquire(Identifier: TPGVIdentifier): UInt32;
+var
+  Segment:  PPGVSegment;
+  Entry:    PPGVSegmentEntry;
+begin
+Result := 0;
+GlobVarLock;
+try
+  If EntryFind(Identifier,Segment,Entry) then
+    begin
+      If Entry^.RefCount < High(UInt32) then
+        begin
+          Inc(Entry^.RefCount);
+          Result := Entry^.RefCount;
+        end
+      else raise EPGVInvalidState.Create('GlobVarAcquire: Reference count already at its maximum.');
+    end
+  else raise EPGVUnknownVariable.CreateFmt('GlobVarAcquire: Unknown variable "%s".',[Identifier]);
+finally
+  GlobVarUnlock;
+end;
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarAcquire(const Identifier: String): UInt32;
+var
+  Segment:  PPGVSegment;
+  Entry:    PPGVSegmentEntry;
+begin
+Result := 0;
+GlobVarLock;
+try
+  If EntryFind(GlobVarTranslateIdentifier(Identifier),Segment,Entry) then
+    begin
+      If Entry^.RefCount < High(UInt32) then
+        begin
+          Inc(Entry^.RefCount);
+          Result := Entry^.RefCount;
+        end
+      else raise EPGVInvalidState.Create('GlobVarAcquire: Reference count already at its maximum.');
+    end
+  else raise EPGVUnknownVariable.CreateFmt('GlobVarAcquire: Unknown variable "%s".',[Identifier]);
+finally
+  GlobVarUnlock;
+end;
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarAcquire(Variable: TPGVVariable): UInt32;
+var
+  Entry:  PPGVSegmentEntry;
+begin
+Result := 0;
+If Assigned(Variable) then
+  begin
+    GlobVarLock;
+    try
+      Entry := EntryFromVar(Variable);
+      If EntryIsValid(Entry) then
+        begin
+          If Entry^.RefCount < High(UInt32) then
+            begin
+              Inc(Entry^.RefCount);
+              Result := Entry^.RefCount;
+            end
+          else raise EPGVInvalidState.Create('GlobVarAcquire: Reference count already at its maximum.');
+        end
+      else raise EPGVInvalidVariable.Create('GlobVarAcquire: Invalid variable entry.');
+    finally
+      GlobVarUnlock;
+    end;
+  end
+else raise EPGVInvalidValue.Create('GlobVarAcquire: Nil variable reference.');
+end;
+
+//------------------------------------------------------------------------------
+
+Function GlobVarRelease(Identifier: TPGVIdentifier; CanFree: Boolean = True): UInt32;
+var
+  Segment:  PPGVSegment;
+  Entry:    PPGVSegmentEntry;
+begin
+Result := 0;
+GlobVarLock;
+try
+  If EntryFind(Identifier,Segment,Entry) then
+    begin
+      If Entry^.RefCount > 0 then
+        Dec(Entry^.RefCount);
+      Result := Entry^.RefCount;
+      If (Entry^.RefCount <= 0) and CanFree then
+        EntryFree(Segment,Entry);  
+    end
+  else raise EPGVUnknownVariable.CreateFmt('GlobVarRelease: Unknown variable "%s".',[Identifier]);
+finally
+  GlobVarUnlock;
+end;
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarRelease(const Identifier: String; CanFree: Boolean = True): UInt32;
+var
+  Segment:  PPGVSegment;
+  Entry:    PPGVSegmentEntry;
+begin
+Result := 0;
+GlobVarLock;
+try
+  If EntryFind(GlobVarTranslateIdentifier(Identifier),Segment,Entry) then
+    begin
+      If Entry^.RefCount > 0 then
+        Dec(Entry^.RefCount);
+      Result := Entry^.RefCount;
+      If (Entry^.RefCount <= 0) and CanFree then
+        EntryFree(Segment,Entry);  
+    end
+  else raise EPGVUnknownVariable.CreateFmt('GlobVarRelease: Unknown variable "%s".',[Identifier]);
 finally
   GlobVarUnlock;
 end;
@@ -2083,6 +2458,31 @@ finally
 end;
 end;
 
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarStore(Variable: TPGVVariable; const Buffer; Count: TMemSize): TMemSize;
+var
+  Entry:  PPGVSegmentEntry;
+begin
+Result := 0;
+If Assigned(Variable) then
+  begin
+    GlobVarLock;
+    try
+      Entry := EntryFromVar(Variable);
+      If EntryIsValid(Entry) then
+        begin
+          Result := Min(Count,EntrySize(Entry));
+          Move(Buffer,Entry^.Address^,Result);
+        end
+      else raise EPGVInvalidVariable.Create('GlobVarStore: Invalid variable entry.');
+    finally
+      GlobVarUnlock;
+    end;
+  end
+else raise EPGVInvalidValue.Create('GlobVarStore: Nil variable reference.');
+end;
+
 //------------------------------------------------------------------------------
 
 Function GlobVarLoad(Identifier: TPGVIdentifier; out Buffer; Count: TMemSize): TMemSize;
@@ -2123,6 +2523,31 @@ try
 finally
   GlobVarUnlock;
 end;
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarLoad(Variable: TPGVVariable; out Buffer; Count: TMemSize): TMemSize;
+var
+  Entry:  PPGVSegmentEntry;
+begin
+Result := 0;
+If Assigned(Variable) then
+  begin
+    GlobVarLock;
+    try
+      Entry := EntryFromVar(Variable);
+      If EntryIsValid(Entry) then
+        begin
+          Result := Min(Count,EntrySize(Entry));
+          Move(Entry^.Address^,Addr(Buffer)^,Result);
+        end
+      else raise EPGVInvalidVariable.Create('GlobVarLoad: Invalid variable entry.');
+    finally
+      GlobVarUnlock;
+    end;
+  end
+else raise EPGVInvalidValue.Create('GlobVarStore: Nil variable reference.');
 end;
 
 
