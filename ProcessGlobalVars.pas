@@ -273,7 +273,7 @@ type
   This number is used only internally so this call is here only for informative
   purposes.
 
-    WARNING - in 64bit systems, the highest bit of the result will is set,
+    WARNING - in 64bit systems, the highest bit of the result will be set,
               making the number a large negative integer. This is to separate
               64bit and 32bit implementations in a case they meet in one
               process (should not be possible, but better be safe than sorry).
