@@ -71,19 +71,19 @@
       strings can point to the same variable.
 
       The implementation also contains what is called "internal compatibility
-      version" - only libraries with the same version can share data. This
-      mechanism is here to prevent problems when/if this library changes its
-      internal workings, so libraries with incompatible code do not access the
-      same internal state and inadvertently corrupt it.
+      version" (ICV) - only libraries with the same version can share data.
+      This mechanism is here to prevent problems when/if this library changes
+      its internal workings, so libraries with incompatible code do not access
+      the same internal state and inadvertently corrupt it.
 
     For more information about this library, refer to description of provided
     procedural interface and its types.
 
-  Version 1.0 (2024-10-10)
+  Version 1.1 (2024-10-24)
 
-  Internal compatibility version - 0 (zero)
+  Internal compatibility version 1
 
-  Last change 2024-10-10
+  Last change 2024-10-24
 
   ©2024 František Milt
 
@@ -465,6 +465,32 @@ Function GlobVarGet(const Identifier: String): TPGVVariable; overload;
 Function GlobVarGet(Identifier: TPGVIdentifier; var Size: TMemSize; out Variable: TPGVVariable): TPGVGetResult; overload;
 Function GlobVarGet(const Identifier: String; var Size: TMemSize; out Variable: TPGVVariable): TPGVGetResult; overload;{$IFDEF CanInline} inline;{$ENDIF}
 
+{
+  GlobVarRename
+
+  Changes identifier of selected variable to a new one. No existing references
+  are affected by this operation.
+
+  If variable with OldIdentifier does not exist, then ans EPGVUnknownVariable
+  exception is raised. Overload accepting variable reference will raise an
+  EPGVInvalidVariable exception if the reference is not valid.
+
+  If old and new identifiers match (two different strings can produce the same
+  identifier and therefore be considered equal - see GlobVarTranslateIdentifier
+  for details), then nothing is done. But note that the variable is still
+  searched for, and if it does not exist then an exception is raised.
+
+  If a variable with NewIdentifier already exists, and it is not the one that
+  is being renamed, then an EPGVDuplicateVariable exception is raised.
+}
+Function GlobVarRename(OldIdentifier,NewIdentifier: TPGVIdentifier): TPGVVariable; overload;
+Function GlobVarRename(OldIdentifier: TPGVIdentifier; const NewIdentifier: String): TPGVVariable; overload;{$IFDEF CanInline} inline;{$ENDIF}
+Function GlobVarRename(const OldIdentifier: String; NewIdentifier: TPGVIdentifier): TPGVVariable; overload;
+Function GlobVarRename(const OldIdentifier,NewIdentifier: String): TPGVVariable; overload;{$IFDEF CanInline} inline;{$ENDIF}
+
+procedure GlobVarRename(Variable: TPGVVariable; NewIdentifier: TPGVIdentifier); overload;
+procedure GlobVarRename(Variable: TPGVVariable; NewIdentifier: String); overload;{$IFDEF CanInline} inline;{$ENDIF}
+
 //------------------------------------------------------------------------------
 {
   GlobVarIsValid
@@ -478,6 +504,18 @@ Function GlobVarGet(const Identifier: String; var Size: TMemSize; out Variable: 
   be pointing to a correct place (and you better make sure it does...).
 }
 Function GlobVarIsValid(Variable: TPGVVariable; CheckAddress: Boolean = True): Boolean;
+
+{
+  GlobVarIdentifier
+
+  Returns identifier of variable whose reference is given.
+
+  This is intended for situations where one needs an identifier of unknown
+  variable or of a variable that might have been renamed.
+
+  Raises an EPGVInvalidVariable exception if the reference is not valid.
+}
+Function GlobVarIdentifier(Variable: TPGVVariable): TPGVIdentifier;
 
 {
   GlobVarExists
@@ -531,6 +569,46 @@ Function GlobVarSize(Variable: TPGVVariable): TMemSize; overload;
 Function GlobVarHeapStored(Identifier: TPGVIdentifier): Boolean; overload;
 Function GlobVarHeapStored(const Identifier: String): Boolean; overload;
 Function GlobVarHeapStored(Variable: TPGVVariable): Boolean; overload;
+
+//------------------------------------------------------------------------------
+type
+{
+  TPGVVariableFlag
+  TPGVVariableFlags
+
+  Used when returning flags of selected variable. If the flag is set, then
+  the corresponding enum value will be included in the TPGVVariableFlags set,
+  otherwise it will be excluded from that set.
+
+    vfRealocated - variable was reallocated at least once during its life (only
+                   true reallocations set this flag, call to GlobVarRealloc(ate)
+                   might not actually perform it if not needed)
+
+    vfRenamed    - variable was renamed at least once (only true renamings
+                   count)
+}
+  TPGVVariableFlag = (vfReallocated,vfRenamed);
+
+  TPGVVariableFlags = set of TPGVVariableFlag;
+
+{
+  GlobVarGetFlags
+
+  Returns a set type indicating which flags are set in the internal state of
+  given variable. See types TPGVVariableFlag and TPGVVariableFlags for details.
+
+  Note that currently the flags don't have much practical use, maybe in future
+  implementations.
+
+  If the requested variable does not exist, then an EPGVUnknownVariable
+  exception will be raised (overloads accepting indetifier).
+
+  Overload accepting variable reference can also raise an EPGVInvalidVariable
+  exception if the reference is not valid.
+}
+Function GlobVarGetFlags(Identifier: TPGVIdentifier): TPGVVariableFlags; overload;
+Function GlobVarGetFlags(const Identifier: String): TPGVVariableFlags; overload;
+Function GlobVarGetFlags(Variable: TPGVVariable): TPGVVariableFlags; overload;
 
 //------------------------------------------------------------------------------
 {
@@ -797,14 +875,11 @@ type
 
 const
   // SEFLAG = segment entry flag
-  PGV_SEFLAG_USED        = UInt32($00000001);
-  PGV_SEFLAG_REALLOCATED = UInt32($00000002);
+  PGV_SEFLAG_USED        = UInt32($00000100);
+  PGV_SEFLAG_REALLOCATED = UInt32($00000200);
+  PGV_SEFLAG_RENAMED     = UInt32($00000400);
 
-  PGV_SEFLAG_SMLSIZE_MASK   = UInt32($F0000000);
-  // dunno, but FPC 3.2.2 cannot seem to grasp (X and not PGV_SEFLAG_SMLSIZE_MASK) :/
-  PGV_SEFLAG_SMLSIZE_MASK_N = UInt32($0FFFFFFF);
-  PGV_SEFLAG_SMLSIZE_SMASK  = UInt32($0000000F);
-  PGV_SEFLAG_SMLSIZE_SHIFT  = 28;
+  PGV_SEFLAG_SMLSIZE_MASK = UInt32($0000000F);
 
 //------------------------------------------------------------------------------
 const  
@@ -1127,6 +1202,17 @@ end;
 
 //==============================================================================
 
+Function EntryDecodeFlags(Entry: PPGVSegmentEntry): TPGVVariableFlags;
+begin
+Result := [];
+If (Entry^.Flags and PGV_SEFLAG_REALLOCATED) <> 0 then
+  Include(Result,vfReallocated);
+If (Entry^.Flags and PGV_SEFLAG_RENAMED) <> 0 then
+  Include(Result,vfRenamed);
+end;
+
+//------------------------------------------------------------------------------
+
 Function EntryFromVar(Variable: TPGVVariable): PPGVSegmentEntry;
 begin
 {$IFDEF FPCDWM}{$PUSH}W4055 W4056{$ENDIF}
@@ -1139,7 +1225,7 @@ end;
 Function EntrySize(Entry: PPGVSegmentEntry): TMemSize;
 begin
 If (Entry^.Flags and PGV_SEFLAG_SMLSIZE_MASK) <> 0 then
-  Result := TMemSize((Entry^.Flags shr PGV_SEFLAG_SMLSIZE_SHIFT) and PGV_SEFLAG_SMLSIZE_SMASK)
+  Result := TMemSize(Entry^.Flags and PGV_SEFLAG_SMLSIZE_MASK)
 else
   Result := Entry^.Size;
 end;
@@ -1250,7 +1336,7 @@ Entry^.RefCount := 0;
 If Size <= SizeOf(TMemSize) then
   begin
     // do not allocate on heap, the variable can fit into entry's Size field
-    Entry^.Flags := Entry^.Flags or ((UInt32(Size) and PGV_SEFLAG_SMLSIZE_SMASK) shl PGV_SEFLAG_SMLSIZE_SHIFT);
+    Entry^.Flags := Entry^.Flags or UInt32(Size and PGV_SEFLAG_SMLSIZE_MASK);
     Entry^.Address := Addr(Entry^.Size);
     Entry^.Size := 0;
   end
@@ -1291,13 +1377,12 @@ If (PtrUInt(Entry) > PtrUInt(Segment)) and ((PtrUInt(Entry) < (PtrUInt(Segment) 
                 {$IFDEF FPCDWM}{$PUSH}W4055{$ENDIF}
                   FillChar(Pointer(PtrUInt(Addr(Entry^.Size)) + PtrUInt(OldSize))^,NewSize - OldSize,0);
                 {$IFDEF FPCDWM}{$POP}{$ENDIF}
-                Entry^.Flags := (Entry^.Flags and PGV_SEFLAG_SMLSIZE_MASK_N) or
-                  ((UInt32(NewSize) and PGV_SEFLAG_SMLSIZE_SMASK) shl PGV_SEFLAG_SMLSIZE_SHIFT);
+                Entry^.Flags := (Entry^.Flags and not PGV_SEFLAG_SMLSIZE_MASK) or UInt32(NewSize and PGV_SEFLAG_SMLSIZE_MASK);
               end
             else
               begin
                 // data will be move to heap
-                Entry^.Flags := Entry^.Flags and PGV_SEFLAG_SMLSIZE_MASK_N;
+                Entry^.Flags := Entry^.Flags and not PGV_SEFLAG_SMLSIZE_MASK;
                 Entry^.Address := GlobalMemoryAllocate(NewSize);
                 Move(Entry^.Size,Entry^.Address^,OldSize);
                 Entry^.Size := NewSize;
@@ -1312,8 +1397,7 @@ If (PtrUInt(Entry) > PtrUInt(Segment)) and ((PtrUInt(Entry) < (PtrUInt(Segment) 
                 Move(Entry^.Address^,Entry^.Size,NewSize);
                 GlobalMemoryFree(Entry^.Address);
                 Entry^.Address := Addr(Entry^.Size);
-                Entry^.Flags := (Entry^.Flags and PGV_SEFLAG_SMLSIZE_MASK_N) or
-                  ((UInt32(NewSize) and PGV_SEFLAG_SMLSIZE_SMASK) shl PGV_SEFLAG_SMLSIZE_SHIFT);
+                Entry^.Flags := (Entry^.Flags and not PGV_SEFLAG_SMLSIZE_MASK) or UInt32(NewSize and PGV_SEFLAG_SMLSIZE_MASK);
               end
             else
               begin
@@ -1346,7 +1430,7 @@ If (PtrUInt(Entry) > PtrUInt(Segment)) and ((PtrUInt(Entry) < (PtrUInt(Segment) 
     // free the entry
     Entry^.Size := 0;
     // free memory only if the variable is allocated on the heap
-    If (Entry^.Flags or PGV_SEFLAG_SMLSIZE_MASK) = 0 then
+    If (Entry^.Flags and PGV_SEFLAG_SMLSIZE_MASK) = 0 then
       GlobalMemoryFree(Entry^.Address); // sets the address to nil
     Entry^.Flags := 0;
     Entry^.RefCount := 0;
@@ -1357,6 +1441,25 @@ If (PtrUInt(Entry) > PtrUInt(Segment)) and ((PtrUInt(Entry) < (PtrUInt(Segment) 
       SegmentRemove(Segment);
   end
 else raise EPGVInvalidValue.Create('EntryFree: Given entry does not belong to given segment.');
+end;
+
+//------------------------------------------------------------------------------
+
+procedure EntryRename(Entry: PPGVSegmentEntry; NewIdentifier: TPGVIdentifier);
+var
+  CheckSegment: PPGVSegment;
+  CheckEntry:   PPGVSegmentEntry;
+begin
+If EntryFind(NewIdentifier,CheckSegment,CheckEntry) then
+  begin
+    If CheckEntry = Entry then
+      Exit  // given variable already has the requested identifier
+    else
+      raise EPGVDuplicateVariable.CreateFmt('EntryRename: Variable 0x%.8x already exists.',[NewIdentifier]);
+  end;
+// entry of given new identifier does not exist, do the renaming
+Entry^.Identifier := NewIdentifier;
+Entry^.Flags := Entry^.Flags or PGV_SEFLAG_RENAMED;
 end;
   
 {===============================================================================
@@ -1373,7 +1476,7 @@ type
 const
   PGV_EXPORTNAME_GETHEAD = 'ProcessGlobalVarsGetHead';
 
-  PGV_VERSION_CURRENT = Int32(0){$IFDEF CPU64bit} or Int32(UInt32(1) shl 31){$ENDIF};
+  PGV_VERSION_CURRENT = Int32(1){$IFDEF CPU64bit} or Int32(UInt32(1) shl 31){$ENDIF};
 
 //------------------------------------------------------------------------------
 
@@ -1409,7 +1512,7 @@ BytesNeeded := 1024 * SizeOf(THandle);
 repeat
   SetLength(Result,BytesNeeded);
   If not EnumProcessModules(GetCurrentProcess,Addr(Result[Low(Result)]),Length(Result) * SizeOf(THandle),@BytesNeeded) then
-    raise EPGVModuleEnumerationError.CreateFmt('EnumProcessModules: Failed to enumerate process modules (%d).',[GetLastError]);
+    raise EPGVModuleEnumerationError.CreateFmt('EnumerateProcessModules: Failed to enumerate process modules (%d).',[GetLastError]);
 until DWORD(Length(Result) * SizeOf(THandle)) >= BytesNeeded;
 // limit length to what is really enumerated
 SetLength(Result,BytesNeeded div SizeOf(THandle));
@@ -1982,6 +2085,97 @@ begin
 Result := GlobVarGet(GlobVarTranslateIdentifier(Identifier),Size,Variable);
 end;
 
+//------------------------------------------------------------------------------
+
+Function GlobVarRename(OldIdentifier,NewIdentifier: TPGVIdentifier): TPGVVariable;
+var
+  Segment:  PPGVSegment;
+  Entry:    PPGVSegmentEntry;
+begin
+Result := nil;
+GlobVarLock;
+try
+  If EntryFind(OldIdentifier,Segment,Entry) then
+    begin
+      // if new identifier is the same as old, do nothing
+      If NewIdentifier <> OldIdentifier then
+        EntryRename(Entry,NewIdentifier);
+      Result := Addr(Entry^.Address);        
+    end
+  else raise EPGVUnknownVariable.CreateFmt('GlobVarRename: Unknown variable 0x%.8x.',[OldIdentifier]);
+finally
+  GlobVarUnlock;
+end;
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarRename(OldIdentifier: TPGVIdentifier; const NewIdentifier: String): TPGVVariable;
+begin
+Result := GlobVarRename(OldIdentifier,GlobVarTranslateIdentifier(NewIdentifier));
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarRename(const OldIdentifier: String; NewIdentifier: TPGVIdentifier): TPGVVariable;
+var
+  OldIdentNum:  TPGVIDentifier;
+  Segment:      PPGVSegment;
+  Entry:        PPGVSegmentEntry;
+begin
+Result := nil;
+GlobVarLock;
+try
+  OldIdentNum := GlobVarTranslateIdentifier(OldIdentifier);
+  If EntryFind(OldIdentNum,Segment,Entry) then
+    begin
+      // if new identifier is the same as old, do nothing
+      If NewIdentifier <> OldIdentNum then
+        EntryRename(Entry,NewIdentifier);
+      Result := Addr(Entry^.Address);
+    end
+  else raise EPGVUnknownVariable.CreateFmt('GlobVarRename: Unknown variable "%s".',[OldIdentifier]);
+finally
+  GlobVarUnlock;
+end;
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarRename(const OldIdentifier,NewIdentifier: String): TPGVVariable;
+begin
+Result := GlobVarRename(OldIdentifier,GlobVarTranslateIdentifier(NewIdentifier));
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+procedure GlobVarRename(Variable: TPGVVariable; NewIdentifier: TPGVIdentifier);
+var
+  Entry:  PPGVSegmentEntry;
+begin
+If Assigned(Variable) then
+  begin
+    GlobVarLock;
+    try
+      Entry := EntryFromVar(Variable);
+      If EntryIsValid(Entry) then
+        EntryRename(Entry,NewIdentifier)
+      else
+        raise EPGVInvalidVariable.Create('GlobVarRename: Invalid variable entry.');
+    finally
+      GlobVarUnlock;
+    end;
+  end
+else raise EPGVInvalidValue.Create('GlobVarRename: Nil variable reference.');
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+procedure GlobVarRename(Variable: TPGVVariable; NewIdentifier: String);
+begin
+GlobVarRename(Variable,GlobVarTranslateIdentifier(NewIdentifier));
+end;
+
 //==============================================================================
 
 Function GlobVarIsValid(Variable: TPGVVariable; CheckAddress: Boolean = True): Boolean;
@@ -2004,6 +2198,29 @@ If Assigned(Variable) then
       GlobVarUnlock;
     end;
   end;
+end;
+
+//------------------------------------------------------------------------------
+
+Function GlobVarIdentifier(Variable: TPGVVariable): TPGVIdentifier;
+var
+  Entry:  PPGVSegmentEntry;
+begin
+Result := 0;
+If Assigned(Variable) then
+  begin
+    GlobVarLock;
+    try
+      Entry := EntryFromVar(Variable);
+      If EntryIsValid(Entry) then
+        Result := Entry^.Identifier
+      else
+        raise EPGVInvalidVariable.Create('GlobVarIdentifier: Invalid variable entry.');
+    finally
+      GlobVarUnlock;
+    end;
+  end
+else raise EPGVInvalidValue.Create('GlobVarIdentifier: Nil variable reference.');
 end;
 
 //------------------------------------------------------------------------------
@@ -2148,6 +2365,67 @@ If Assigned(Variable) then
     end;
   end
 else raise EPGVInvalidValue.Create('GlobVarHeapStored: Nil variable reference.');
+end;
+
+//==============================================================================
+
+Function GlobVarGetFlags(Identifier: TPGVIdentifier): TPGVVariableFlags;
+var
+  Segment:  PPGVSegment;
+  Entry:    PPGVSegmentEntry;
+begin
+Result := [];
+GlobVarLock;
+try
+  If EntryFind(Identifier,Segment,Entry) then
+    Result := EntryDecodeFlags(Entry)
+  else
+    raise EPGVUnknownVariable.CreateFmt('GlobVarGetFlags: Unknown variable 0x%.8x.',[Identifier]);
+finally
+  GlobVarUnlock;
+end;
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarGetFlags(const Identifier: String): TPGVVariableFlags;
+var
+  Segment:  PPGVSegment;
+  Entry:    PPGVSegmentEntry;
+begin
+Result := [];
+GlobVarLock;
+try
+  If EntryFind(GlobVarTranslateIdentifier(Identifier),Segment,Entry) then
+    Result := EntryDecodeFlags(Entry)
+  else
+    raise EPGVUnknownVariable.CreateFmt('GlobVarGetFlags: Unknown variable "%s".',[Identifier]);
+finally
+  GlobVarUnlock;
+end;
+end;
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+Function GlobVarGetFlags(Variable: TPGVVariable): TPGVVariableFlags;
+var
+  Entry:  PPGVSegmentEntry;
+begin
+Result := [];
+If Assigned(Variable) then
+  begin
+    GlobVarLock;
+    try
+      Entry := EntryFromVar(Variable);
+      If EntryIsValid(Entry) then
+        Result := EntryDecodeFlags(Entry)
+      else
+        raise EPGVInvalidVariable.Create('GlobVarGetFlags: Invalid variable entry.');
+    finally
+      GlobVarUnlock;
+    end;
+  end
+else raise EPGVInvalidValue.Create('GlobVarGetFlags: Nil variable reference.');
 end;
 
 //==============================================================================
