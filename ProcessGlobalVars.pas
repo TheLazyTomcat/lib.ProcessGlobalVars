@@ -83,7 +83,7 @@
 
   Internal compatibility version 1
 
-  Last change 2025-02-20
+  Last change 2025-02-24
 
   ©2024-2025 František Milt
 
@@ -1261,6 +1261,9 @@ end;
 {===============================================================================
     PGV internal implementation - module initialization
 ===============================================================================}
+{-------------------------------------------------------------------------------
+    PGV internal implementation - loaded modules enumeration
+-------------------------------------------------------------------------------}
 type
 {$IFDEF Windows}
   TPGVModuleArray = array of THandle;
@@ -1273,8 +1276,129 @@ type
 {$ENDIF}
 
 //------------------------------------------------------------------------------
+{$IFNDEF Windows}
+Function ModuleEnumCallback(info: dl_phdr_info_p; size: size_t; data: Pointer): cInt; cdecl;
+begin
+If Assigned(info) and (size >= (2 * SizeOf(Pointer))) then
+  begin
+    If PPGVModuleArray(Data)^.Count <= Length(PPGVModuleArray(Data)^.Arr) then
+      SetLength(PPGVModuleArray(Data)^.Arr,Length(PPGVModuleArray(Data)^.Arr) + 16);
+    PPGVModuleArray(Data)^.Arr[PPGVModuleArray(Data)^.Count] := String(info^.dlpi_name);
+    Inc(PPGVModuleArray(Data)^.Count);
+  end;
+Result := 0;
+end;
+{$ENDIF}
+
+//------------------------------------------------------------------------------
+
+procedure EnumerateProcessModules(out Modules: TPGVModuleArray);
 {$IFDEF Windows}
-{$IFNDEF FPC}
+var
+  BytesNeeded:  DWORD;
+begin
+Modules := nil;
+BytesNeeded := 1024 * SizeOf(THandle);
+repeat
+  SetLength(Modules,BytesNeeded);
+  If not EnumProcessModules(GetCurrentProcess,Addr(Modules[Low(Modules)]),Length(Modules) * SizeOf(THandle),@BytesNeeded) then
+    raise EPGVModuleEnumerationError.CreateFmt('EnumerateProcessModules: Failed to enumerate process modules (%d).',[GetLastError]);
+until DWORD(Length(Modules) * SizeOf(THandle)) >= BytesNeeded;
+// limit length to what is really enumerated
+SetLength(Modules,BytesNeeded div SizeOf(THandle));
+end;
+{$ELSE}
+begin
+Modules.Arr := nil;
+Modules.Count := 0;
+dl_iterate_phdr(@ModuleEnumCallback,@Modules);
+SetLength(Modules.Arr,Modules.Count);
+end;
+{$ENDIF}
+
+{-------------------------------------------------------------------------------
+    PGV internal implementation - head pointer loading
+-------------------------------------------------------------------------------}
+
+Function LoadHeadPointer: Boolean;
+var
+  Modules:      TPGVModuleArray;
+  i:            Integer;
+  GetHeadFunc:  Pointer;
+  HeadTemp:     PPGVHead;
+{$IFNDEF Windows}
+  ProbedMod:    Pointer;
+{$ENDIF}
+begin
+// enumerate modules loaded within this process...
+EnumerateProcessModules(Modules);
+{
+  Traverse all loaded modules and look whether they export a properly named
+  function.
+
+  If this function is found, call it - when it returns nil, it means it is
+  incompatible with this implementation and continue searching.
+  When it returns non-nil pointer, use that for head pointer global variable,
+  increment its reference counter, return true and exit.
+
+  If no function of that name is found or all exported functions return nil,
+  returns false (full initialization (allocation) will be done by caller).
+
+  Windows...
+
+    Note that the modules contain the current module - this is not a problem
+    since calling local *GetHead function will just return nil (as the global
+    variable is not yet initilized) and therefore it will be ignored.
+}
+Result := False;
+{$IFDEF Windows}
+For i := Low(Modules) to High(Modules) do
+  begin
+    GetHeadFunc := GetProcAddress(Modules[i],PGV_EXPORTNAME_GETHEAD);
+    If Assigned(GetHeadFunc) then
+      begin
+        HeadTemp := TPGVGetHeadFunc(GetHeadFunc)(PGV_VERSION_CURRENT);
+        If Assigned(HeadTemp) then
+          begin
+            Inc(HeadTemp^.RefCount);
+            VAR_HeadPtr := HeadTemp;
+            Result := True;
+            // we have everything we need, do not continue modules traversal
+            Break{For i};
+          end;
+      end;
+  end;
+{$ELSE}
+For i := Low(Modules.Arr) to Pred(Modules.Count) do
+  begin
+    ProbedMod := dlopen(PChar(Modules.Arr[i]),RTLD_NOW);
+    If Assigned(ProbedMod) then
+      try
+        GetHeadFunc := dlsym(ProbedMod,PGV_EXPORTNAME_GETHEAD);
+        If Assigned(GetHeadFunc) then
+          begin
+            HeadTemp := TPGVGetHeadFunc(GetHeadFunc)(PGV_VERSION_CURRENT);
+            If Assigned(HeadTemp) then
+              begin
+                Inc(HeadTemp^.RefCount);
+                VAR_HeadPtr := HeadTemp;
+                Result := True;
+                Break{For i};
+              end;
+          end;
+      finally
+        If dlclose(ProbedMod) <> 0 then
+          raise EPGVSystemError.CreateFmt('ModuleInitialization: Failed to close probed module (%s).',[dlerror]);
+      end
+    else raise EPGVSystemError.CreateFmt('ModuleInitialization: Failed to open probed module (%s).',[dlerror]);
+  end;
+{$ENDIF}
+end;
+
+{-------------------------------------------------------------------------------
+    PGV internal implementation - main intialization
+-------------------------------------------------------------------------------}
+{$IF Defined(Windows) and not Defined(FPC)}
 var
   PrevDllProc:  Pointer;
   DLLParam:     PtrInt;
@@ -1302,60 +1426,14 @@ DLLParam := Reserved;
 If Assigned(PrevDllProc) then
   TLocalDLLProc(PrevDllProc)(Reason,Reserved);
 end;
-{$ENDIF}
-
-{$ELSE}//-linux-----------------------------------------------------------------
-
-Function ModuleEnumCallback(info: dl_phdr_info_p; size: size_t; data: Pointer): cInt; cdecl;
-begin
-If Assigned(info) and (size >= (2 * SizeOf(Pointer))) then
-  begin
-    If PPGVModuleArray(Data)^.Count <= Length(PPGVModuleArray(Data)^.Arr) then
-      SetLength(PPGVModuleArray(Data)^.Arr,Length(PPGVModuleArray(Data)^.Arr) + 16);
-    PPGVModuleArray(Data)^.Arr[PPGVModuleArray(Data)^.Count] := String(info^.dlpi_name);
-    Inc(PPGVModuleArray(Data)^.Count);
-  end;
-Result := 0;
-end;
-
-{$ENDIF}
-//------------------------------------------------------------------------------
-
-procedure EnumerateProcessModules(out Modules: TPGVModuleArray);
-{$IFDEF Windows}
-var
-  BytesNeeded:  DWORD;
-begin
-Modules := nil;
-BytesNeeded := 1024 * SizeOf(THandle);
-repeat
-  SetLength(Modules,BytesNeeded);
-  If not EnumProcessModules(GetCurrentProcess,Addr(Modules[Low(Modules)]),Length(Modules) * SizeOf(THandle),@BytesNeeded) then
-    raise EPGVModuleEnumerationError.CreateFmt('EnumerateProcessModules: Failed to enumerate process modules (%d).',[GetLastError]);
-until DWORD(Length(Modules) * SizeOf(THandle)) >= BytesNeeded;
-// limit length to what is really enumerated
-SetLength(Modules,BytesNeeded div SizeOf(THandle));
-end;
-{$ELSE}
-begin
-Modules.Arr := nil;
-Modules.Count := 0;
-dl_iterate_phdr(@ModuleEnumCallback,@Modules);
-SetLength(Modules.Arr,Modules.Count);
-end;
-{$ENDIF}
+{$IFEND}
 
 //------------------------------------------------------------------------------
 
 procedure ModuleInitialization;
-var
-  Modules:      TPGVModuleArray;
-  i:            Integer;
-  GetHeadFunc:  Pointer;
-  HeadTemp:     PPGVHead;
 {$IFNDEF Windows}
-  ProbedMod:    Pointer;
-  LocalHead:    TPGVHead;
+var
+  LocalHead:  TPGVHead;
 {$ENDIF}
 begin
 {
@@ -1373,85 +1451,28 @@ begin
 PrevDllProc := @SysInit.DllProcEx;
 SysInit.DllProcEx := TDLLProcEx(@ProcessGlobalVarsDllProc);
 {$ENDIF}{$ENDIF}
-// enumerate modules loaded within this process...
-EnumerateProcessModules(Modules);
-{
-  Traverse all loaded modules and look whether they export a properly named
-  function.
-
-  If this function is found, call it - when it returns nil, it means it is
-  incompatible with this implementation and continue searching.
-  When it returns non-nil pointer, use that for head pointer global variable,
-  increment its reference counter and exit.
-
-  If no function of that name is found or all exported functions return nil, do
-  full initialization (allocation) here.
-
-  Windows...
-
-    Note that the modules contain the current module - this is not a problem
-    since calling local *GetHead function will just return nil (as the global
-    variable is not yet initilized) and therefore it will be ignored.
-}
-{$IFDEF Windows}
-For i := Low(Modules) to High(Modules) do
+If not LoadHeadPointer then
   begin
-    GetHeadFunc := GetProcAddress(Modules[i],PGV_EXPORTNAME_GETHEAD);
-    If Assigned(GetHeadFunc) then
-      begin
-        HeadTemp := TPGVGetHeadFunc(GetHeadFunc)(PGV_VERSION_CURRENT);
-        If Assigned(HeadTemp) then
-          begin
-            Inc(HeadTemp^.RefCount);
-            VAR_HeadPtr := HeadTemp;
-            // we have everything we need, do not continue this function
-            Exit;
-          end;
-      end;
-  end;
-{$ELSE}
-For i := Low(Modules.Arr) to Pred(Modules.Count) do
-  begin
-    ProbedMod := dlopen(PChar(Modules.Arr[i]),RTLD_NOW);
-    If Assigned(ProbedMod) then
-      try
-        GetHeadFunc := dlsym(ProbedMod,PGV_EXPORTNAME_GETHEAD);
-        If Assigned(GetHeadFunc) then
-          begin
-            HeadTemp := TPGVGetHeadFunc(GetHeadFunc)(PGV_VERSION_CURRENT);
-            If Assigned(HeadTemp) then
-              begin
-                Inc(HeadTemp^.RefCount);
-                VAR_HeadPtr := HeadTemp;
-                Exit;
-              end;
-          end;
-      finally
-        If dlclose(ProbedMod) <> 0 then
-          raise EPGVSystemError.CreateFmt('ModuleInitialization: Failed to close probed module (%s).',[dlerror]);
-      end
-    else raise EPGVSystemError.CreateFmt('ModuleInitialization: Failed to open probed module (%s).',[dlerror]);
-  end;
-{$ENDIF}
-{
-  If we are here it means no currently loaded module provides usable PGV, we
-  need to allocete it ourselves.
+  {
+    No currently loaded module provides usable PGV, we need to allocete it
+    ourselves.
 
-  Linux...
+    Linux...
 
-    The head is allocated using global memory allocation routines, but these
-    require that the head is already prepared - catch 22. We use local variable
-    to provide what the allocation rutine require.
-}
-{$IFNDEF Windows}
-LocalHead.Allocator.AllocFunc := @lin_malloc;
-VAR_HeadPtr := @LocalHead;
-{$ENDIF}
-VAR_HeadPtr := GlobalMemoryAllocate(SizeOf(TPGVHead));
-// initialize head fields (fields not explicitly touched here are zeroed)
-VAR_HeadPtr^.RefCount := 1;
-GlobalMemoryInit;
-ThreadLockInit;
+      The head is allocated using global memory allocation routines, but these
+      require that the head is already prepared - catch 22. We use local
+      variable to provide what the allocation rutine require.
+  }
+  {$IFNDEF Windows}
+    LocalHead.Allocator.AllocFunc := @lin_malloc;
+    VAR_HeadPtr := @LocalHead;
+  {$ENDIF}
+    VAR_HeadPtr := GlobalMemoryAllocate(SizeOf(TPGVHead));
+    // initialize head fields (fields not explicitly touched here are zeroed)
+    VAR_HeadPtr^.RefCount := 1;
+    GlobalMemoryInit;
+    ThreadLockInit;
+  end;
 end;
 
 {===============================================================================
