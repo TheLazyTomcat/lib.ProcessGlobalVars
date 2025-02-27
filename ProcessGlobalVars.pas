@@ -80,11 +80,11 @@
     For more information about this library, refer to description of provided
     procedural interface and its types.
 
-  Version 1.2 (2025-02-26)
+  Version 1.2.1 (2025-02-27)
 
   Internal compatibility version 1
 
-  Last change 2025-02-26
+  Last change 2025-02-27
 
   ©2024-2025 František Milt
 
@@ -306,7 +306,7 @@ type
     All functions operating on variables that accept either numeral or string
     identifiers have one unfortunate thing in common - everytime they are
     called, they search the entire internal state for the requested variable,
-    and this searching cannot be much optimized.
+    and this searching cannot be much optimized (but see identifiers caching).
 
     To improve performance, you can call functions accepting direct variable
     reference (provided you already have it, eg. from allocation) - these
@@ -363,6 +363,47 @@ Function GlobVarTranslateIdentifier(const Identifier: String): TPGVIdentifier;{$
 
 //------------------------------------------------------------------------------
 {
+  GlobVarIdentifierCache
+
+  Indicates whether indentifiers caching is enabled (returns true) or disabled
+  (retursn false) for the calling thread.
+
+  Identifiers caching overview
+
+    It is a simple system that caches up-to four identifiers that were used the
+    most recently. It aims to speed-up variables access when they are referenced
+    by their identifiers - eg. when a varible is created and then manipulated
+    using againt only its identifier, it is not searched within the internal
+    state in every call, but instead taken from the cache, which is (usually)
+    much faster.
+
+      NOTE - by default this system is DISABLED, you have to explicitly enable
+             it (by calling GlobVarIdentifierCacheEnable).
+
+      WARNING - the caching is thread-local (each thread has its own cache).
+                This allows for non-locking access but also means that you have
+                to enable (or disable) it separately in each and every thread.
+}
+Function GlobVarIdentifierCache: Boolean;
+
+{
+  GlobVarIdentifierCacheEnable
+
+  Enables identifiers caching for the calling thread and returns previous state
+  of it (true when it was enabled, false when it was disabled).
+}
+Function GlobVarIdentifierCacheEnable: Boolean;
+
+{
+  GlobVarIdentifierCacheEnable
+
+  Disables identifiers caching for the calling thread and returns previous
+  state of it.
+}
+Function GlobVarIdentifierCacheDisable: Boolean;
+
+//------------------------------------------------------------------------------
+{
   GlobVarLock
 
   Locks internal state of this library for the calling thread, making sure no
@@ -380,6 +421,9 @@ Function GlobVarTranslateIdentifier(const Identifier: String): TPGVIdentifier;{$
 
       GlobVarInternalCompatibilityVersion
       GlobVarTranslateIdentifier
+      GlobVarIdentifierCache
+      GlobVarIdentifierCacheEnable
+      GlobVarIdentifierCacheDisable
       GlobVarLock
       GlobVarUnlock
 
@@ -1922,6 +1966,151 @@ GlobalMemoryFree(Temp);
 end;
 
 {===============================================================================
+    PGV internal implementation - identifiers caching
+===============================================================================}
+const
+  PGV_IC_CAPACITY = 4;
+
+type
+  TPGVIdentCacheItem = record
+    Identifier: TPGVIdentifier;
+    Segment:    PPGVSegment;
+    Entry:      PPGVSegmentEntry;
+  end;
+
+  TPGVIdentCache = record
+    Enabled:  Boolean;
+    Count:    Integer;
+    Items:    array[0..Pred(PGV_IC_CAPACITY)] of TPGVIdentCacheItem;
+  end;
+  PPGVIdentCache = ^TPGVIdentCache;
+
+threadvar
+  THRVAR_IdentCache:  TPGVIdentCache;
+
+//------------------------------------------------------------------------------
+
+Function IdentCacheFind(Identifier: TPGVIdentifier; out Segment: PPGVSegment; out Entry: PPGVSegmentEntry): Boolean;
+var
+  CachePtr: PPGVIdentCache;
+  i,j:      Integer;
+  TempItem: TPGVIdentCacheItem;
+begin
+Result := False;
+{
+  We are operating on a pointer intead of the variable itself to limit number
+  of TLS lookups (eg. calls to GetTLS).
+
+  Also, as the cache is thread variable, there is no need for any locking.
+}
+CachePtr := @THRVAR_IdentCache;
+If CachePtr^.Enabled and (CachePtr^.Count > 0) then
+  begin
+    For i := Low(CachePtr^.Items) to Pred(CachePtr^.Count) do
+      If CachePtr^.Items[i].Identifier = Identifier then
+        begin
+          Segment := CachePtr^.Items[i].Segment;
+          Entry := CachePtr^.Items[i].Entry;
+          // move the accessed identifier to the first place
+          If i > Low(CachePtr^.Items) then
+            begin
+              TempItem := CachePtr^.Items[i];
+              For j := i downto Succ(Low(CachePtr^.Items)) do
+                CachePtr^.Items[j] := CachePtr^.Items[j - 1];
+              CachePtr^.Items[Low(CachePtr^.Items)] := TempItem;
+            end;
+          Result := True;
+          Break{For i};
+        end;
+  end;
+end;
+
+//------------------------------------------------------------------------------
+
+procedure IdentCacheAdd(Identifier: TPGVIdentifier; Segment: PPGVSegment; Entry: PPGVSegmentEntry);
+var
+  CachePtr: PPGVIdentCache;
+  i,j:      Integer;
+begin
+CachePtr := @THRVAR_IdentCache;
+If CachePtr^.Enabled then
+  begin
+    // look whether the identifier is already cached...
+    For i := Low(CachePtr^.Items) to Pred(CachePtr^.Count) do
+      If CachePtr^.Items[i].Identifier = Identifier then
+        begin
+        {
+          Identifier is already cached, move it to the first place (if it
+          isn't there) and exit the functions.
+        }
+          If i > Low(CachePtr^.Items) then
+            begin
+              For j := i downto Succ(Low(CachePtr^.Items)) do
+                CachePtr^.Items[j] := CachePtr^.Items[j - 1];
+              CachePtr^.Items[Low(CachePtr^.Items)].Identifier := Identifier;
+              // possibly update stored pointers
+              CachePtr^.Items[Low(CachePtr^.Items)].Segment := Segment;
+              CachePtr^.Items[Low(CachePtr^.Items)].Entry := Entry;
+            end;
+          Exit;
+        end;
+  {
+    If here, it means the identifier is not yet cached, move existing items
+    up and put it at the first place.
+  }
+    For i := High(CachePtr^.Items) downto Succ(Low(CachePtr^.Items)) do
+      CachePtr^.Items[i] := CachePtr^.Items[i - 1];
+    CachePtr^.Items[Low(CachePtr^.Items)].Identifier := Identifier;
+    CachePtr^.Items[Low(CachePtr^.Items)].Segment := Segment;
+    CachePtr^.Items[Low(CachePtr^.Items)].Entry := Entry;
+    If CachePtr^.Count < Length(CachePtr^.Items) then
+      Inc(CachePtr^.Count);
+  end;
+end;
+
+//------------------------------------------------------------------------------
+
+procedure IdentCacheRemove(Identifier: TPGVIdentifier);
+var
+  CachePtr: PPGVIdentCache;
+  i,j:      Integer;
+begin
+CachePtr := @THRVAR_IdentCache;
+If CachePtr^.Enabled and (CachePtr^.Count > 0) then
+  begin
+    // find the item
+    For i := Low(CachePtr^.Items) to Pred(CachePtr^.Count) do
+      If CachePtr^.Items[i].Identifier = Identifier then
+        begin
+          // item found, remove it
+          For j := i to (CachePtr^.Count - 2) do
+            CachePtr^.Items[j] := CachePtr^.Items[j + 1];
+          Dec(CachePtr^.Count);
+          Break{For i};
+        end;
+  end;
+end;
+
+//------------------------------------------------------------------------------
+
+procedure IdentCacheRename(OldIdentifier,NewIdentifier: TPGVIdentifier);
+var
+  CachePtr: PPGVIdentCache;
+  i:        Integer;
+begin
+CachePtr := @THRVAR_IdentCache;
+If CachePtr^.Enabled and (CachePtr^.Count > 0) then
+  begin
+    For i := Low(CachePtr^.Items) to Pred(CachePtr^.Count) do
+      If CachePtr^.Items[i].Identifier = OldIdentifier then
+        begin
+          CachePtr^.Items[i].Identifier := NewIdentifier;
+          Break{For i};
+        end;
+  end;
+end;
+
+{===============================================================================
     PGV internal implementation - entries management and utility
 ===============================================================================}
 
@@ -2032,20 +2221,24 @@ begin
 // lock must be acquired by the caller
 Segment := nil;
 Entry := nil;
-CurrentSegment := VAR_HeadPtr^.FirstSegment;
-while Assigned(CurrentSegment) and not (Assigned(Segment) and Assigned(Entry)) do
+If not IdentCacheFind(Identifier,Segment,Entry) then
   begin
-    If CurrentSegment^.Head.AllocCount > 0 then
-      For i := Low(CurrentSegment^.Entries) to High(CurrentSegment^.Entries) do
-        If ((CurrentSegment^.Entries[i].Flags and PGV_SEFLAG_USED) <> 0) and
-          (CurrentSegment^.Entries[i].Identifier = Identifier) then
-          begin
-            Segment := CurrentSegment;
-            Entry := Addr(CurrentSegment^.Entries[i]);
-            // while cycle will break too because both Segment and Entry are assigned
-            Break{For i};
-          end;
-    CurrentSegment := CurrentSegment^.Head.NextSegment;
+    CurrentSegment := VAR_HeadPtr^.FirstSegment;
+    while Assigned(CurrentSegment) and not (Assigned(Segment) and Assigned(Entry)) do
+      begin
+        If CurrentSegment^.Head.AllocCount > 0 then
+          For i := Low(CurrentSegment^.Entries) to High(CurrentSegment^.Entries) do
+            If ((CurrentSegment^.Entries[i].Flags and PGV_SEFLAG_USED) <> 0) and
+              (CurrentSegment^.Entries[i].Identifier = Identifier) then
+              begin
+                Segment := CurrentSegment;
+                Entry := Addr(CurrentSegment^.Entries[i]);
+                IdentCacheAdd(Identifier,Segment,Entry);
+                // while cycle will break too because both Segment and Entry are assigned
+                Break{For i};
+              end;
+        CurrentSegment := CurrentSegment^.Head.NextSegment;
+      end;
   end;
 Result := Assigned(Segment) and Assigned(Entry);
 end;
@@ -2065,6 +2258,7 @@ If EntryFind(NewIdentifier,CheckSegment,CheckEntry) then
       raise EPGVDuplicateVariable.CreateFmt('EntryRename: Variable 0x%.8x already exists.',[NewIdentifier]);
   end;
 // entry of given new identifier does not exist, do the renaming
+IdentCacheRename(Entry^.Identifier,NewIdentifier);
 Entry^.Identifier := NewIdentifier;
 Entry^.Flags := Entry^.Flags or PGV_SEFLAG_RENAMED;
 end;
@@ -2123,6 +2317,7 @@ else
     Entry^.Address := GlobalMemoryAllocate(Size);
     Entry^.Size := Size;
   end;
+IdentCacheAdd(Identifier,Segment,Entry);
 end;
 
 //------------------------------------------------------------------------------
@@ -2204,6 +2399,7 @@ begin
 If (PtrUInt(Entry) > PtrUInt(Segment)) and ((PtrUInt(Entry) < (PtrUInt(Segment) + PGV_SEGMENT_SIZE))) then
 {$IFDEF FPCDWM}{$POP}{$ENDIF}
   begin
+    IdentCacheRemove(Entry^.Identifier);
     // free the entry
     Entry^.Size := 0;
     // free memory only if the variable is allocated on the heap
@@ -2240,6 +2436,29 @@ end;
 Function GlobVarTranslateIdentifier(const Identifier: String): TPGVIdentifier;
 begin
 Result := TPGVIdentifier(WideStringAdler32(StrToWide(Identifier)));
+end;
+
+//==============================================================================
+
+Function GlobVarIdentifierCache: Boolean;
+begin
+Result := THRVAR_IdentCache.Enabled;
+end;
+
+//------------------------------------------------------------------------------
+
+Function GlobVarIdentifierCacheEnable: Boolean;
+begin
+Result := THRVAR_IdentCache.Enabled;
+THRVAR_IdentCache.Enabled := True;
+end;
+
+//------------------------------------------------------------------------------
+
+Function GlobVarIdentifierCacheDisable: Boolean;
+begin
+Result := THRVAR_IdentCache.Enabled;
+THRVAR_IdentCache.Enabled := False;
 end;
 
 //==============================================================================
