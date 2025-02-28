@@ -84,7 +84,7 @@
 
   Internal compatibility version 1
 
-  Last change 2025-02-27
+  Last change 2025-02-28
 
   ©2024-2025 František Milt
 
@@ -965,6 +965,7 @@ uses
 
 {$IFNDEF Windows}
   {$LINKLIB C}
+  {$LINKLIB DL}
   {$LINKLIB PTHREAD}
 {$ENDIF}
 
