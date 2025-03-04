@@ -80,11 +80,11 @@
     For more information about this library, refer to description of provided
     procedural interface and its types.
 
-  Version 1.2.1 (2025-02-27)
+  Version 1.2.2 (2025-03-04)
 
   Internal compatibility version 1
 
-  Last change 2025-02-28
+  Last change 2025-03-04
 
   ©2024-2025 František Milt
 
@@ -1109,7 +1109,6 @@ Function pthread_mutex_destroy(mutex: pthread_mutex_p): cint; cdecl; external;
 Function pthread_mutex_trylock(mutex: pthread_mutex_p): cint; cdecl; external;
 Function pthread_mutex_lock(mutex: pthread_mutex_p): cint; cdecl; external;
 Function pthread_mutex_unlock(mutex: pthread_mutex_p): cint; cdecl; external;
-Function pthread_mutex_consistent(mutex: pthread_mutex_p): cint; cdecl; external;
 
 threadvar
   ThrErrorCode: cInt;
@@ -1259,9 +1258,9 @@ begin
 RetVal := pthread_mutex_trylock(@VAR_HeadPtr^.Lock);
 If RetVal = ESysEOWNERDEAD then
   begin
-    If not PThrResChk(pthread_mutex_consistent(@VAR_HeadPtr^.Lock)) then
-      raise EPGVMutexError.CreateFmt('TryThreadLock: Failed to make mutex consistent (%d).',[ThrErrorCode]);
-    Result := True;
+    // bad, state can be corrupted, make the mutex unusable and fail
+    pthread_mutex_unlock(@VAR_HeadPtr^.Lock); // ignore errors
+    raise EPGVMutexError.Create('TryThreadLock: Mutex owner died, protected data might be corrupted.');
   end
 else
   begin
@@ -1286,8 +1285,8 @@ begin
 RetVal := pthread_mutex_lock(@VAR_HeadPtr^.Lock);
 If RetVal = ESysEOWNERDEAD then
   begin
-    If not PThrResChk(pthread_mutex_consistent(@VAR_HeadPtr^.Lock)) then
-      raise EPGVMutexError.CreateFmt('ThreadLock: Failed to make mutex consistent (%d).',[ThrErrorCode]);
+    pthread_mutex_unlock(@VAR_HeadPtr^.Lock);
+    raise EPGVMutexError.Create('ThreadLock: Mutex owner died, protected data might be corrupted.');
   end
 else If not PThrResChk(RetVal) then
   raise EPGVMutexError.CreateFmt('ThreadLock: Failed to lock mutex (%d).',[ThrErrorCode]);
